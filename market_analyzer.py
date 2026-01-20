@@ -105,6 +105,80 @@ class MarketOverview:
     limit_up_broken_count: int = 0      # 炸板数（曾涨停后打开）
     continuous_limit_up_count: int = 0  # 连板股票数
     first_limit_up_count: int = 0       # 首板股票数
+    
+    # ========== 新增数据维度（埋伏分析和复盘）==========
+    
+    # 板块异动详情
+    board_changes: List[Dict] = field(default_factory=list)  # 板块异动列表
+    board_change_count: int = 0         # 板块异动总次数
+    
+    # 盘口异动
+    pankou_changes: Dict[str, List[Dict]] = field(default_factory=dict)  # 盘口异动分类数据
+    big_buy_count: int = 0              # 大笔买入次数
+    big_sell_count: int = 0             # 大笔卖出次数
+    limit_up_seal_count: int = 0        # 封涨停板次数
+    limit_down_seal_count: int = 0      # 封跌停板次数
+    rocket_launch_count: int = 0        # 火箭发射次数
+    high_dive_count: int = 0            # 高台跳水次数
+    
+    # 财新内容精选
+    caixin_news: List[Dict] = field(default_factory=list)  # 财新新闻列表
+    
+    # ========== 涨停板行情数据 ==========
+    
+    # 涨停股池
+    zt_pool: List[Dict] = field(default_factory=list)       # 涨停股池列表
+    zt_pool_count: int = 0              # 涨停股数量
+    zt_total_amount: float = 0.0        # 涨停股总成交额（亿元）
+    zt_avg_turnover: float = 0.0        # 涨停股平均换手率
+    zt_first_board_count: int = 0       # 首板数量
+    zt_continuous_count: int = 0        # 连板数量（连板数>=2）
+    zt_max_continuous: int = 0          # 最高连板数
+    
+    # 昨日涨停股池（今日表现）
+    previous_zt_pool: List[Dict] = field(default_factory=list)  # 昨日涨停股今日表现
+    previous_zt_count: int = 0          # 昨日涨停数量
+    previous_zt_avg_change: float = 0.0 # 昨日涨停今日平均涨跌幅（溢价率）
+    previous_zt_up_count: int = 0       # 昨日涨停今日上涨数量
+    previous_zt_down_count: int = 0     # 昨日涨停今日下跌数量
+    
+    # 强势股池
+    strong_pool: List[Dict] = field(default_factory=list)   # 强势股池列表
+    strong_pool_count: int = 0          # 强势股数量
+    strong_new_high_count: int = 0      # 60日新高数量
+    strong_multi_zt_count: int = 0      # 近期多次涨停数量
+    
+    # 炸板股池
+    zb_pool: List[Dict] = field(default_factory=list)       # 炸板股池列表
+    zb_pool_count: int = 0              # 炸板股数量
+    zb_total_count: int = 0             # 炸板总次数
+    zb_rate: float = 0.0                # 炸板率（炸板数/涨停数）
+    
+    # 跌停股池
+    dt_pool: List[Dict] = field(default_factory=list)       # 跌停股池列表
+    dt_pool_count: int = 0              # 跌停股数量
+    dt_continuous_count: int = 0        # 连续跌停数量
+    
+    # ========== 千股千评数据 ==========
+    
+    # 市场整体评分
+    comment_avg_score: float = 0.0      # 市场平均综合得分
+    comment_high_score_count: int = 0   # 高分股票数量（>=80分）
+    comment_low_score_count: int = 0    # 低分股票数量（<=40分）
+    comment_top_stocks: List[Dict] = field(default_factory=list)  # 综合得分TOP10
+    comment_bottom_stocks: List[Dict] = field(default_factory=list)  # 综合得分最低10
+    comment_high_attention: List[Dict] = field(default_factory=list)  # 关注指数TOP10
+    
+    # ========== 分析师指数数据 ==========
+    
+    analyst_top_list: List[Dict] = field(default_factory=list)  # 分析师排行TOP10
+    analyst_top_stocks: List[Dict] = field(default_factory=list)  # 分析师推荐股票
+    
+    # ========== 潜力股发现（资金流入但热度不高）==========
+    
+    # 低热度资金流入股票
+    hidden_inflow_stocks: List[Dict] = field(default_factory=list)  # 资金流入但热度低的股票
+    hidden_inflow_analysis: str = ""    # AI分析结论
 
 
 class MarketAnalyzer:
@@ -120,8 +194,11 @@ class MarketAnalyzer:
     6. 获取龙虎榜数据
     7. 获取大宗交易数据
     8. 获取概念板块热点
-    9. 搜索市场新闻
-    10. 生成大盘复盘报告
+    9. 获取板块异动详情
+    10. 获取盘口异动数据
+    11. 获取财新内容精选
+    12. 搜索市场新闻
+    13. 生成大盘复盘报告
     """
     
     # 主要指数代码
@@ -191,6 +268,24 @@ class MarketAnalyzer:
         self._get_margin_data(overview, target_date)
         self._get_lhb_data(overview, target_date)
         self._get_block_trade_data(overview)
+        
+        # 新增数据维度（实时数据，仅当天有效）
+        if not is_historical:
+            self._get_board_change_data(overview)
+            self._get_pankou_change_data(overview)
+            self._get_caixin_news(overview)
+            self._get_zt_pool_data(overview, target_date)
+            self._get_previous_zt_pool_data(overview, target_date)
+            self._get_strong_pool_data(overview, target_date)
+            self._get_zb_pool_data(overview, target_date)
+            self._get_dt_pool_data(overview, target_date)
+            self._get_comment_data(overview)
+            self._get_analyst_data(overview)
+            
+            # 潜力股挖掘：资金流入但热度不高的股票
+            overview.hidden_inflow_stocks = self._find_hidden_inflow_stocks(overview)
+            if overview.hidden_inflow_stocks:
+                overview.hidden_inflow_analysis = self._analyze_hidden_inflow_with_llm(overview)
         
         return overview
 
@@ -575,6 +670,800 @@ class MarketAnalyzer:
         except Exception as e:
             logger.warning(f"[大盘] 获取大宗交易数据失败: {e}")
 
+    def _get_board_change_data(self, overview: MarketOverview):
+        """
+        获取板块异动详情
+        
+        数据来源：东方财富-行情中心-当日板块异动详情
+        https://quote.eastmoney.com/changes/
+        """
+        try:
+            logger.info("[大盘] 获取板块异动详情...")
+            
+            df = self._call_akshare_with_retry(ak.stock_board_change_em, "板块异动详情", attempts=2)
+            
+            if df is not None and not df.empty:
+                # 板块异动总次数
+                if '板块异动总次数' in df.columns:
+                    overview.board_change_count = int(df['板块异动总次数'].sum())
+                
+                # 提取板块异动列表（按异动次数排序，取前10）
+                df_sorted = df.sort_values('板块异动总次数', ascending=False)
+                for _, row in df_sorted.head(10).iterrows():
+                    overview.board_changes.append({
+                        'name': str(row.get('板块名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'main_net_inflow': float(row.get('主力净流入', 0) or 0) / 1e8,  # 转为亿元
+                        'change_count': int(row.get('板块异动总次数', 0) or 0),
+                        'top_stock_code': str(row.get('板块异动最频繁个股及所属类型-股票代码', '')),
+                        'top_stock_name': str(row.get('板块异动最频繁个股及所属类型-股票名称', '')),
+                        'top_stock_direction': str(row.get('板块异动最频繁个股及所属类型-买卖方向', '')),
+                    })
+                
+                logger.info(f"[大盘] 板块异动: {len(df)}个板块, 总异动{overview.board_change_count}次")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取板块异动详情失败: {e}")
+    
+    def _get_pankou_change_data(self, overview: MarketOverview):
+        """
+        获取盘口异动数据
+        
+        数据来源：东方财富-行情中心-盘口异动
+        https://quote.eastmoney.com/changes/
+        
+        异动类型包括：
+        - 大笔买入/大笔卖出
+        - 封涨停板/封跌停板
+        - 火箭发射/高台跳水
+        - 快速反弹/加速下跌
+        等
+        """
+        try:
+            logger.info("[大盘] 获取盘口异动数据...")
+            
+            # 定义需要获取的异动类型（用于埋伏分析和复盘）
+            change_types = {
+                '大笔买入': 'big_buy',
+                '大笔卖出': 'big_sell',
+                '封涨停板': 'limit_up_seal',
+                '封跌停板': 'limit_down_seal',
+                '火箭发射': 'rocket_launch',
+                '高台跳水': 'high_dive',
+                '快速反弹': 'quick_rebound',
+                '加速下跌': 'accelerate_down',
+            }
+            
+            for cn_name, en_key in change_types.items():
+                try:
+                    df = ak.stock_changes_em(symbol=cn_name)
+                    if df is not None and not df.empty:
+                        # 存储异动数据
+                        change_list = []
+                        for _, row in df.head(20).iterrows():  # 每类取前20条
+                            change_list.append({
+                                'time': str(row.get('时间', '')),
+                                'code': str(row.get('代码', '')),
+                                'name': str(row.get('名称', '')),
+                                'sector': str(row.get('板块', '')),
+                                'info': str(row.get('相关信息', '')),
+                            })
+                        overview.pankou_changes[cn_name] = change_list
+                        
+                        # 更新统计计数
+                        count = len(df)
+                        if en_key == 'big_buy':
+                            overview.big_buy_count = count
+                        elif en_key == 'big_sell':
+                            overview.big_sell_count = count
+                        elif en_key == 'limit_up_seal':
+                            overview.limit_up_seal_count = count
+                        elif en_key == 'limit_down_seal':
+                            overview.limit_down_seal_count = count
+                        elif en_key == 'rocket_launch':
+                            overview.rocket_launch_count = count
+                        elif en_key == 'high_dive':
+                            overview.high_dive_count = count
+                        
+                except Exception as e:
+                    logger.debug(f"[大盘] 获取{cn_name}异动失败: {e}")
+                    continue
+            
+            logger.info(f"[大盘] 盘口异动: 大笔买入{overview.big_buy_count}次 大笔卖出{overview.big_sell_count}次 "
+                       f"封涨停{overview.limit_up_seal_count}次 封跌停{overview.limit_down_seal_count}次 "
+                       f"火箭发射{overview.rocket_launch_count}次 高台跳水{overview.high_dive_count}次")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取盘口异动数据失败: {e}")
+    
+    def _get_caixin_news(self, overview: MarketOverview):
+        """
+        获取财新内容精选
+        
+        数据来源：财新网-财新数据通
+        https://cxdata.caixin.com/pc/
+        """
+        try:
+            logger.info("[大盘] 获取财新内容精选...")
+            
+            df = self._call_akshare_with_retry(ak.stock_news_main_cx, "财新内容精选", attempts=2)
+            
+            if df is not None and not df.empty:
+                # 提取财新新闻列表（取前20条）
+                for _, row in df.head(20).iterrows():
+                    overview.caixin_news.append({
+                        'tag': str(row.get('tag', '')),
+                        'summary': str(row.get('summary', '')),
+                        'url': str(row.get('url', '')),
+                    })
+                
+                logger.info(f"[大盘] 财新内容精选: 获取{len(overview.caixin_news)}条")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取财新内容精选失败: {e}")
+
+    def _get_zt_pool_data(self, overview: MarketOverview, target_date: Optional[str] = None):
+        """
+        获取涨停股池数据
+        
+        数据来源：东方财富网-行情中心-涨停板行情-涨停股池
+        https://quote.eastmoney.com/ztb/detail#type=ztgc
+        
+        包含：涨停股列表、连板数、封板资金、炸板次数等
+        """
+        try:
+            logger.info("[大盘] 获取涨停股池数据...")
+            
+            date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_zt_pool_em(date=date_str),
+                "涨停股池", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                overview.zt_pool_count = len(df)
+                
+                # 统计连板情况
+                if '连板数' in df.columns:
+                    df['连板数'] = pd.to_numeric(df['连板数'], errors='coerce')
+                    overview.zt_first_board_count = len(df[df['连板数'] == 1])
+                    overview.zt_continuous_count = len(df[df['连板数'] >= 2])
+                    overview.zt_max_continuous = int(df['连板数'].max()) if not df['连板数'].isna().all() else 0
+                
+                # 统计成交额和换手率
+                if '成交额' in df.columns:
+                    df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+                    overview.zt_total_amount = df['成交额'].sum() / 1e8  # 转为亿元
+                if '换手率' in df.columns:
+                    df['换手率'] = pd.to_numeric(df['换手率'], errors='coerce')
+                    overview.zt_avg_turnover = df['换手率'].mean()
+                
+                # 提取涨停股列表（按连板数排序，取前15）
+                df_sorted = df.sort_values('连板数', ascending=False) if '连板数' in df.columns else df
+                for _, row in df_sorted.head(15).iterrows():
+                    overview.zt_pool.append({
+                        'code': str(row.get('代码', '')),
+                        'name': str(row.get('名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'amount': float(row.get('成交额', 0) or 0) / 1e8,
+                        'turnover': float(row.get('换手率', 0) or 0),
+                        'continuous': int(row.get('连板数', 1) or 1),
+                        'first_time': str(row.get('首次封板时间', '')),
+                        'last_time': str(row.get('最后封板时间', '')),
+                        'zb_count': int(row.get('炸板次数', 0) or 0),
+                        'seal_amount': float(row.get('封板资金', 0) or 0) / 1e8,
+                        'industry': str(row.get('所属行业', '')),
+                        'zt_stat': str(row.get('涨停统计', '')),
+                    })
+                
+                logger.info(f"[大盘] 涨停股池: {overview.zt_pool_count}只, 首板{overview.zt_first_board_count}只, "
+                           f"连板{overview.zt_continuous_count}只, 最高{overview.zt_max_continuous}板")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取涨停股池数据失败: {e}")
+    
+    def _get_previous_zt_pool_data(self, overview: MarketOverview, target_date: Optional[str] = None):
+        """
+        获取昨日涨停股池数据（今日表现）
+        
+        数据来源：东方财富网-行情中心-涨停板行情-昨日涨停股池
+        https://quote.eastmoney.com/ztb/detail#type=zrzt
+        
+        用于分析涨停溢价率
+        """
+        try:
+            logger.info("[大盘] 获取昨日涨停股池数据...")
+            
+            date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_zt_pool_previous_em(date=date_str),
+                "昨日涨停股池", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                overview.previous_zt_count = len(df)
+                
+                # 统计今日涨跌情况
+                if '涨跌幅' in df.columns:
+                    df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+                    overview.previous_zt_avg_change = df['涨跌幅'].mean()
+                    overview.previous_zt_up_count = len(df[df['涨跌幅'] > 0])
+                    overview.previous_zt_down_count = len(df[df['涨跌幅'] < 0])
+                
+                # 提取昨日涨停股列表（按涨跌幅排序，取前10）
+                df_sorted = df.sort_values('涨跌幅', ascending=False) if '涨跌幅' in df.columns else df
+                for _, row in df_sorted.head(10).iterrows():
+                    overview.previous_zt_pool.append({
+                        'code': str(row.get('代码', '')),
+                        'name': str(row.get('名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'amount': float(row.get('成交额', 0) or 0) / 1e8,
+                        'turnover': float(row.get('换手率', 0) or 0),
+                        'yesterday_continuous': int(row.get('昨日连板数', 1) or 1),
+                        'industry': str(row.get('所属行业', '')),
+                    })
+                
+                logger.info(f"[大盘] 昨日涨停: {overview.previous_zt_count}只, "
+                           f"今日平均涨跌{overview.previous_zt_avg_change:.2f}%(溢价率), "
+                           f"上涨{overview.previous_zt_up_count}只 下跌{overview.previous_zt_down_count}只")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取昨日涨停股池数据失败: {e}")
+    
+    def _get_strong_pool_data(self, overview: MarketOverview, target_date: Optional[str] = None):
+        """
+        获取强势股池数据
+        
+        数据来源：东方财富网-行情中心-涨停板行情-强势股池
+        https://quote.eastmoney.com/ztb/detail#type=qsgc
+        
+        包含：60日新高或近期多次涨停的股票
+        """
+        try:
+            logger.info("[大盘] 获取强势股池数据...")
+            
+            date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_zt_pool_strong_em(date=date_str),
+                "强势股池", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                overview.strong_pool_count = len(df)
+                
+                # 统计入选理由
+                if '入选理由' in df.columns:
+                    overview.strong_new_high_count = len(df[df['入选理由'].str.contains('60日新高', na=False)])
+                    overview.strong_multi_zt_count = len(df[df['入选理由'].str.contains('多次涨停', na=False)])
+                
+                # 提取强势股列表（按涨跌幅排序，取前10）
+                if '涨跌幅' in df.columns:
+                    df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
+                    df_sorted = df.sort_values('涨跌幅', ascending=False)
+                else:
+                    df_sorted = df
+                    
+                for _, row in df_sorted.head(10).iterrows():
+                    overview.strong_pool.append({
+                        'code': str(row.get('代码', '')),
+                        'name': str(row.get('名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'is_new_high': str(row.get('是否新高', '')),
+                        'reason': str(row.get('入选理由', '')),
+                        'industry': str(row.get('所属行业', '')),
+                    })
+                
+                logger.info(f"[大盘] 强势股池: {overview.strong_pool_count}只, "
+                           f"60日新高{overview.strong_new_high_count}只, 多次涨停{overview.strong_multi_zt_count}只")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取强势股池数据失败: {e}")
+    
+    def _get_zb_pool_data(self, overview: MarketOverview, target_date: Optional[str] = None):
+        """
+        获取炸板股池数据
+        
+        数据来源：东方财富网-行情中心-涨停板行情-炸板股池
+        https://quote.eastmoney.com/ztb/detail#type=zbgc
+        
+        注意：只能获取最近30个交易日的数据
+        """
+        try:
+            logger.info("[大盘] 获取炸板股池数据...")
+            
+            date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_zt_pool_zbgc_em(date=date_str),
+                "炸板股池", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                overview.zb_pool_count = len(df)
+                
+                # 统计炸板总次数
+                if '炸板次数' in df.columns:
+                    df['炸板次数'] = pd.to_numeric(df['炸板次数'], errors='coerce')
+                    overview.zb_total_count = int(df['炸板次数'].sum())
+                
+                # 计算炸板率
+                total_touched_zt = overview.zt_pool_count + overview.zb_pool_count
+                if total_touched_zt > 0:
+                    overview.zb_rate = overview.zb_pool_count / total_touched_zt * 100
+                
+                # 提取炸板股列表（按炸板次数排序，取前10）
+                df_sorted = df.sort_values('炸板次数', ascending=False) if '炸板次数' in df.columns else df
+                for _, row in df_sorted.head(10).iterrows():
+                    overview.zb_pool.append({
+                        'code': str(row.get('代码', '')),
+                        'name': str(row.get('名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'zb_count': int(row.get('炸板次数', 0) or 0),
+                        'first_time': str(row.get('首次封板时间', '')),
+                        'industry': str(row.get('所属行业', '')),
+                    })
+                
+                logger.info(f"[大盘] 炸板股池: {overview.zb_pool_count}只, 炸板{overview.zb_total_count}次, "
+                           f"炸板率{overview.zb_rate:.1f}%")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取炸板股池数据失败: {e}")
+    
+    def _get_dt_pool_data(self, overview: MarketOverview, target_date: Optional[str] = None):
+        """
+        获取跌停股池数据
+        
+        数据来源：东方财富网-行情中心-涨停板行情-跌停股池
+        https://quote.eastmoney.com/ztb/detail#type=dtgc
+        
+        注意：只能获取最近30个交易日的数据
+        """
+        try:
+            logger.info("[大盘] 获取跌停股池数据...")
+            
+            date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_zt_pool_dtgc_em(date=date_str),
+                "跌停股池", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                overview.dt_pool_count = len(df)
+                
+                # 统计连续跌停
+                if '连续跌停' in df.columns:
+                    df['连续跌停'] = pd.to_numeric(df['连续跌停'], errors='coerce')
+                    overview.dt_continuous_count = len(df[df['连续跌停'] >= 2])
+                
+                # 提取跌停股列表（按连续跌停排序，取前10）
+                df_sorted = df.sort_values('连续跌停', ascending=False) if '连续跌停' in df.columns else df
+                for _, row in df_sorted.head(10).iterrows():
+                    overview.dt_pool.append({
+                        'code': str(row.get('代码', '')),
+                        'name': str(row.get('名称', '')),
+                        'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        'continuous': int(row.get('连续跌停', 1) or 1),
+                        'seal_amount': float(row.get('封单资金', 0) or 0) / 1e8,
+                        'open_count': int(row.get('开板次数', 0) or 0),
+                        'industry': str(row.get('所属行业', '')),
+                    })
+                
+                logger.info(f"[大盘] 跌停股池: {overview.dt_pool_count}只, 连续跌停{overview.dt_continuous_count}只")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取跌停股池数据失败: {e}")
+    
+    def _get_comment_data(self, overview: MarketOverview):
+        """
+        获取千股千评数据
+        
+        数据来源：东方财富网-数据中心-特色数据-千股千评
+        https://data.eastmoney.com/stockcomment/
+        
+        包含：综合得分、机构参与度、关注指数等
+        """
+        try:
+            logger.info("[大盘] 获取千股千评数据...")
+            
+            df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+            
+            if df is not None and not df.empty:
+                # 计算市场平均得分
+                if '综合得分' in df.columns:
+                    df['综合得分'] = pd.to_numeric(df['综合得分'], errors='coerce')
+                    overview.comment_avg_score = df['综合得分'].mean()
+                    overview.comment_high_score_count = len(df[df['综合得分'] >= 80])
+                    overview.comment_low_score_count = len(df[df['综合得分'] <= 40])
+                    
+                    # 综合得分TOP10
+                    top_df = df.nlargest(10, '综合得分')
+                    for _, row in top_df.iterrows():
+                        overview.comment_top_stocks.append({
+                            'code': str(row.get('代码', '')),
+                            'name': str(row.get('名称', '')),
+                            'score': float(row.get('综合得分', 0) or 0),
+                            'rank': int(row.get('目前排名', 0) or 0),
+                            'change_pct': float(row.get('涨跌幅', 0) or 0),
+                            'org_participate': float(row.get('机构参与度', 0) or 0),
+                        })
+                    
+                    # 综合得分最低10
+                    bottom_df = df.nsmallest(10, '综合得分')
+                    for _, row in bottom_df.iterrows():
+                        overview.comment_bottom_stocks.append({
+                            'code': str(row.get('代码', '')),
+                            'name': str(row.get('名称', '')),
+                            'score': float(row.get('综合得分', 0) or 0),
+                            'rank': int(row.get('目前排名', 0) or 0),
+                            'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        })
+                
+                # 关注指数TOP10
+                if '关注指数' in df.columns:
+                    df['关注指数'] = pd.to_numeric(df['关注指数'], errors='coerce')
+                    attention_df = df.nlargest(10, '关注指数')
+                    for _, row in attention_df.iterrows():
+                        overview.comment_high_attention.append({
+                            'code': str(row.get('代码', '')),
+                            'name': str(row.get('名称', '')),
+                            'attention': float(row.get('关注指数', 0) or 0),
+                            'score': float(row.get('综合得分', 0) or 0),
+                            'change_pct': float(row.get('涨跌幅', 0) or 0),
+                        })
+                
+                logger.info(f"[大盘] 千股千评: 平均得分{overview.comment_avg_score:.1f}, "
+                           f"高分(>=80){overview.comment_high_score_count}只, "
+                           f"低分(<=40){overview.comment_low_score_count}只")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取千股千评数据失败: {e}")
+    
+    def _get_analyst_data(self, overview: MarketOverview):
+        """
+        获取分析师指数数据
+        
+        数据来源：东方财富网-数据中心-研究报告-东方财富分析师指数
+        https://data.eastmoney.com/invest/invest/list.html
+        
+        包含：分析师排行、推荐股票等
+        """
+        try:
+            logger.info("[大盘] 获取分析师指数数据...")
+            
+            current_year = str(datetime.now().year)
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_analyst_rank_em(year=current_year),
+                "分析师指数", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                # 分析师排行TOP10
+                for _, row in df.head(10).iterrows():
+                    year_yield_col = f'{current_year}年收益率'
+                    stock_name_col = f'{current_year}最新个股评级-股票名称'
+                    stock_code_col = f'{current_year}最新个股评级-股票代码'
+                    
+                    overview.analyst_top_list.append({
+                        'name': str(row.get('分析师名称', '')),
+                        'company': str(row.get('分析师单位', '')),
+                        'index': float(row.get('年度指数', 0) or 0),
+                        'year_yield': float(row.get(year_yield_col, 0) or 0),
+                        'stock_count': int(row.get('成分股个数', 0) or 0),
+                        'latest_stock': str(row.get(stock_name_col, '')),
+                        'latest_code': str(row.get(stock_code_col, '')),
+                        'industry': str(row.get('行业', '')),
+                    })
+                    
+                    # 收集分析师推荐的股票
+                    if row.get(stock_name_col) and row.get(stock_code_col):
+                        overview.analyst_top_stocks.append({
+                            'code': str(row.get(stock_code_col, '')),
+                            'name': str(row.get(stock_name_col, '')),
+                            'analyst': str(row.get('分析师名称', '')),
+                            'company': str(row.get('分析师单位', '')),
+                        })
+                
+                logger.info(f"[大盘] 分析师指数: 获取TOP{len(overview.analyst_top_list)}分析师")
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 获取分析师指数数据失败: {e}")
+
+    def _find_hidden_inflow_stocks(self, overview: MarketOverview) -> List[Dict]:
+        """
+        发现资金流入但热度不高的股票（潜力股挖掘）
+        
+        核心逻辑：
+        1. 从盘口异动-大笔买入中提取有资金流入的股票
+        2. 与千股千评数据交叉，筛选关注指数低的股票
+        3. 排除涨幅过大的股票（避免追高）
+        4. 获取股票的行业、市值等补充信息
+        
+        筛选条件：
+        - 大笔买入次数 >= 2（资金持续流入）
+        - 关注指数 < 市场平均（热度不高）
+        - 今日涨跌幅 < 5%（未大幅拉升）
+        - 综合得分 >= 60（基本面不差）
+        
+        Returns:
+            潜力股列表，每个元素包含股票详细信息
+        """
+        hidden_stocks = []
+        
+        try:
+            logger.info("[大盘] 开始挖掘资金流入但热度不高的股票...")
+            
+            # 1. 统计大笔买入股票的出现次数
+            big_buy_stocks: Dict[str, Dict] = {}  # {code: {name, count, times, sector, info_list}}
+            
+            if '大笔买入' in overview.pankou_changes:
+                for item in overview.pankou_changes['大笔买入']:
+                    code = item.get('code', '')
+                    if not code:
+                        continue
+                    
+                    if code not in big_buy_stocks:
+                        big_buy_stocks[code] = {
+                            'code': code,
+                            'name': item.get('name', ''),
+                            'sector': item.get('sector', ''),
+                            'count': 0,
+                            'times': [],
+                            'info_list': [],
+                        }
+                    
+                    big_buy_stocks[code]['count'] += 1
+                    big_buy_stocks[code]['times'].append(item.get('time', ''))
+                    big_buy_stocks[code]['info_list'].append(item.get('info', ''))
+            
+            if not big_buy_stocks:
+                logger.info("[大盘] 无大笔买入数据，跳过潜力股挖掘")
+                return []
+            
+            logger.info(f"[大盘] 大笔买入股票: {len(big_buy_stocks)}只")
+            
+            # 2. 获取千股千评数据（用于关注指数和综合得分）
+            comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+            
+            if comment_df is None or comment_df.empty:
+                logger.warning("[大盘] 无法获取千股千评数据")
+                return []
+            
+            # 计算市场平均关注指数
+            if '关注指数' in comment_df.columns:
+                comment_df['关注指数'] = pd.to_numeric(comment_df['关注指数'], errors='coerce')
+                avg_attention = comment_df['关注指数'].mean()
+            else:
+                avg_attention = 50.0
+            
+            logger.info(f"[大盘] 市场平均关注指数: {avg_attention:.1f}")
+            
+            # 3. 交叉筛选：大笔买入 + 低关注度 + 低涨幅
+            for code, stock_info in big_buy_stocks.items():
+                # 至少2次大笔买入
+                if stock_info['count'] < 2:
+                    continue
+                
+                # 查找千股千评数据
+                stock_comment = comment_df[comment_df['代码'] == code]
+                if stock_comment.empty:
+                    continue
+                
+                row = stock_comment.iloc[0]
+                
+                # 获取关注指数和综合得分
+                attention = float(row.get('关注指数', 100) or 100)
+                score = float(row.get('综合得分', 0) or 0)
+                change_pct = float(row.get('涨跌幅', 0) or 0)
+                
+                # 筛选条件
+                # 1. 关注指数低于市场平均（热度不高）
+                if attention >= avg_attention:
+                    continue
+                
+                # 2. 今日涨幅不超过5%（未大幅拉升，还有空间）
+                if change_pct > 5:
+                    continue
+                
+                # 3. 综合得分不低于60（基本面不差）
+                if score < 60:
+                    continue
+                
+                # 符合条件，添加到潜力股列表
+                hidden_stocks.append({
+                    'code': code,
+                    'name': stock_info['name'],
+                    'sector': stock_info['sector'],
+                    'big_buy_count': stock_info['count'],
+                    'big_buy_times': stock_info['times'][:5],  # 最多保留5个时间点
+                    'big_buy_info': stock_info['info_list'][:3],  # 最多保留3条信息
+                    'attention': attention,
+                    'attention_vs_avg': attention - avg_attention,  # 与平均值的差距
+                    'score': score,
+                    'change_pct': change_pct,
+                    'rank': int(row.get('目前排名', 0) or 0),
+                    'org_participate': float(row.get('机构参与度', 0) or 0),
+                })
+            
+            # 4. 按大笔买入次数和综合得分排序
+            hidden_stocks.sort(key=lambda x: (x['big_buy_count'], x['score']), reverse=True)
+            
+            logger.info(f"[大盘] 发现 {len(hidden_stocks)} 只资金流入但热度不高的股票")
+            
+            # 5. 获取补充信息（行业、市值等）
+            if hidden_stocks:
+                try:
+                    # 获取A股实时行情补充市值等信息
+                    spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
+                    if spot_df is not None and not spot_df.empty:
+                        for stock in hidden_stocks:
+                            stock_spot = spot_df[spot_df['代码'] == stock['code']]
+                            if not stock_spot.empty:
+                                row = stock_spot.iloc[0]
+                                stock['market_cap'] = float(row.get('总市值', 0) or 0) / 1e8  # 亿元
+                                stock['turnover_rate'] = float(row.get('换手率', 0) or 0)
+                                stock['amount'] = float(row.get('成交额', 0) or 0) / 1e8  # 亿元
+                except Exception as e:
+                    logger.debug(f"[大盘] 获取补充信息失败: {e}")
+            
+            return hidden_stocks[:15]  # 最多返回15只
+            
+        except Exception as e:
+            logger.warning(f"[大盘] 挖掘潜力股失败: {e}")
+            return []
+
+    def _analyze_hidden_inflow_with_llm(self, overview: MarketOverview) -> str:
+        """
+        使用大模型分析资金流入但热度不高的股票
+        
+        综合分析：
+        1. 板块异动数据：哪些板块有主力资金流入
+        2. 盘口异动数据：大笔买入的股票特征
+        3. 千股千评数据：关注指数、综合得分
+        4. 潜力股列表：交叉筛选的结果
+        
+        Returns:
+            AI分析结论
+        """
+        if not self.analyzer or not self.analyzer.is_available():
+            logger.warning("[大盘] AI分析器不可用，跳过潜力股深度分析")
+            return ""
+        
+        if not overview.hidden_inflow_stocks:
+            return ""
+        
+        try:
+            logger.info("[大盘] 调用大模型分析潜力股...")
+            
+            # 构建潜力股数据表格
+            stocks_table = "| 代码 | 名称 | 大笔买入次数 | 关注指数 | 综合得分 | 今日涨跌 | 机构参与度 | 所属板块 |\n"
+            stocks_table += "|------|------|--------------|----------|----------|----------|------------|----------|\n"
+            
+            for stock in overview.hidden_inflow_stocks[:10]:
+                stocks_table += (f"| {stock['code']} | {stock['name']} | "
+                               f"{stock['big_buy_count']}次 | {stock['attention']:.0f} | "
+                               f"{stock['score']:.0f} | {stock['change_pct']:+.2f}% | "
+                               f"{stock.get('org_participate', 0):.1f}% | {stock['sector']} |\n")
+            
+            # 构建板块异动数据
+            board_change_text = ""
+            if overview.board_changes:
+                board_change_text = "| 板块 | 涨跌幅 | 主力净流入 | 异动次数 | 最活跃个股 |\n"
+                board_change_text += "|------|--------|------------|----------|------------|\n"
+                for bc in overview.board_changes[:8]:
+                    board_change_text += (f"| {bc['name']} | {bc['change_pct']:+.2f}% | "
+                                        f"{bc['main_net_inflow']:.2f}亿 | {bc['change_count']}次 | "
+                                        f"{bc['top_stock_name']} |\n")
+            
+            # 构建大笔买入详情
+            big_buy_detail = ""
+            if '大笔买入' in overview.pankou_changes:
+                big_buy_detail = "| 时间 | 代码 | 名称 | 板块 | 详情 |\n"
+                big_buy_detail += "|------|------|------|------|------|\n"
+                for item in overview.pankou_changes['大笔买入'][:15]:
+                    big_buy_detail += (f"| {item['time']} | {item['code']} | "
+                                      f"{item['name']} | {item['sector']} | {item['info'][:30]} |\n")
+            
+            prompt = f"""你是一位专业的A股短线交易分析师，擅长发现主力资金动向和潜力股。
+
+# 任务
+分析以下数据，找出资金正在悄悄流入但市场关注度不高的股票，这类股票往往是主力建仓阶段，后续可能有较大涨幅。
+
+# 数据
+
+## 一、潜力股候选（资金流入 + 低热度）
+
+以下股票满足条件：
+- 今日多次出现大笔买入（资金持续流入）
+- 关注指数低于市场平均（热度不高）
+- 今日涨幅不大（未大幅拉升）
+- 综合得分>=60（基本面不差）
+
+{stocks_table}
+
+## 二、板块异动详情（主力资金动向）
+
+{board_change_text if board_change_text else "暂无板块异动数据"}
+
+## 三、大笔买入明细
+
+{big_buy_detail if big_buy_detail else "暂无大笔买入数据"}
+
+## 四、市场背景
+
+- 今日涨停: {overview.limit_up_count}只
+- 今日跌停: {overview.limit_down_count}只
+- 大笔买入总次数: {overview.big_buy_count}次
+- 大笔卖出总次数: {overview.big_sell_count}次
+- 买卖力量比: {overview.big_buy_count / overview.big_sell_count if overview.big_sell_count > 0 else 0:.2f}
+
+---
+
+# 分析要求
+
+请从以下角度分析：
+
+1. **资金动向判断**：
+   - 哪些板块有主力资金持续流入？
+   - 大笔买入集中在哪些行业/概念？
+   - 是否有板块异动与大笔买入形成共振？
+
+2. **潜力股筛选**：
+   - 从候选股票中，哪些最值得关注？
+   - 为什么这些股票热度低但资金在流入？
+   - 可能的上涨逻辑是什么？
+
+3. **风险提示**：
+   - 哪些股票虽然有资金流入但风险较大？
+   - 需要注意的陷阱有哪些？
+
+4. **操作建议**：
+   - 短期（1-3天）可以关注哪些？
+   - 建议的介入时机和仓位
+
+---
+
+# 输出格式
+
+请直接输出 Markdown 格式的分析报告，简洁明了，重点突出。
+
+## 🔍 潜力股深度分析
+
+### 一、资金动向总结
+（简要分析主力资金流向）
+
+### 二、重点关注股票（2-3只）
+（每只股票说明：为什么值得关注、潜在逻辑、风险点）
+
+### 三、板块机会
+（哪些板块值得埋伏）
+
+### 四、风险提示
+（需要回避的情况）
+
+"""
+            
+            generation_config = {
+                'temperature': 0.6,
+                'max_output_tokens': 1500,
+            }
+            
+            analysis = self.analyzer._call_openai_api(prompt, generation_config)
+            
+            if analysis:
+                logger.info(f"[大盘] 潜力股分析完成，长度: {len(analysis)} 字符")
+                return analysis
+            else:
+                return ""
+                
+        except Exception as e:
+            logger.warning(f"[大盘] 潜力股LLM分析失败: {e}")
+            return ""
+
     
     def search_market_news(self, use_smart_search: bool = True) -> List[Dict]:
         """
@@ -766,6 +1655,42 @@ A股 政策 利好 最新消息
         for stock in overview.lhb_stocks[:5]:
             lhb_text += f"- {stock['name']}({stock['code']}): {stock['change_pct']:+.2f}%, 净买入{stock['net_buy']:.2f}亿, {stock['reason']}\n"
         
+        # 板块异动详情
+        board_change_text = ""
+        if overview.board_changes:
+            for bc in overview.board_changes[:5]:
+                direction = "买入" if bc.get('top_stock_direction') == '大笔买入' else "卖出"
+                board_change_text += f"- {bc['name']}: 涨跌{bc['change_pct']:+.2f}%, 主力净流入{bc['main_net_inflow']:.2f}亿, 异动{bc['change_count']}次, 最活跃:{bc['top_stock_name']}({direction})\n"
+        
+        # 盘口异动统计
+        pankou_text = f"""| 异动类型 | 次数 |
+|----------|------|
+| 大笔买入 | {overview.big_buy_count} |
+| 大笔卖出 | {overview.big_sell_count} |
+| 封涨停板 | {overview.limit_up_seal_count} |
+| 封跌停板 | {overview.limit_down_seal_count} |
+| 火箭发射 | {overview.rocket_launch_count} |
+| 高台跳水 | {overview.high_dive_count} |"""
+        
+        # 盘口异动详情（大笔买入前5）
+        pankou_detail_text = ""
+        if '大笔买入' in overview.pankou_changes:
+            pankou_detail_text += "\n**大笔买入TOP5:**\n"
+            for item in overview.pankou_changes['大笔买入'][:5]:
+                pankou_detail_text += f"- {item['time']} {item['name']}({item['code']}) {item['info']}\n"
+        if '火箭发射' in overview.pankou_changes:
+            pankou_detail_text += "\n**火箭发射TOP5:**\n"
+            for item in overview.pankou_changes['火箭发射'][:5]:
+                pankou_detail_text += f"- {item['time']} {item['name']}({item['code']}) {item['info']}\n"
+        
+        # 财新内容精选
+        caixin_text = ""
+        if overview.caixin_news:
+            for i, news_item in enumerate(overview.caixin_news[:8], 1):
+                tag = news_item.get('tag', '')
+                summary = news_item.get('summary', '')[:80]
+                caixin_text += f"{i}. [{tag}] {summary}\n"
+        
         # 新闻信息
         news_text = ""
         for i, n in enumerate(news[:6], 1):
@@ -780,6 +1705,65 @@ A股 政策 利好 最新消息
         # 计算涨跌比
         total_stocks = overview.up_count + overview.down_count + overview.flat_count
         up_ratio = overview.up_count / total_stocks * 100 if total_stocks > 0 else 0
+        
+        # 计算买卖力量对比
+        buy_sell_ratio = overview.big_buy_count / overview.big_sell_count if overview.big_sell_count > 0 else 0
+        
+        # 涨停板行情数据
+        zt_pool_text = ""
+        if overview.zt_pool:
+            for zt in overview.zt_pool[:8]:
+                zt_pool_text += f"- {zt['name']}({zt['code']}): {zt['continuous']}板, 封板资金{zt['seal_amount']:.2f}亿, {zt['industry']}\n"
+        
+        # 昨日涨停今日表现
+        previous_zt_text = ""
+        if overview.previous_zt_pool:
+            for pzt in overview.previous_zt_pool[:5]:
+                previous_zt_text += f"- {pzt['name']}: 今日{pzt['change_pct']:+.2f}%, 昨日{pzt['yesterday_continuous']}板\n"
+        
+        # 炸板股
+        zb_text = ""
+        if overview.zb_pool:
+            for zb in overview.zb_pool[:5]:
+                zb_text += f"- {zb['name']}: 炸板{zb['zb_count']}次, 涨跌{zb['change_pct']:+.2f}%\n"
+        
+        # 跌停股
+        dt_text = ""
+        if overview.dt_pool:
+            for dt in overview.dt_pool[:5]:
+                dt_text += f"- {dt['name']}: 连续{dt['continuous']}跌停, {dt['industry']}\n"
+        
+        # 千股千评TOP股票
+        comment_top_text = ""
+        if overview.comment_top_stocks:
+            for ct in overview.comment_top_stocks[:5]:
+                comment_top_text += f"- {ct['name']}({ct['code']}): 得分{ct['score']:.0f}, 排名{ct['rank']}, 机构参与度{ct['org_participate']:.1f}%\n"
+        
+        # 高关注度股票
+        attention_text = ""
+        if overview.comment_high_attention:
+            for att in overview.comment_high_attention[:5]:
+                attention_text += f"- {att['name']}: 关注指数{att['attention']:.0f}, 得分{att['score']:.0f}\n"
+        
+        # 分析师推荐
+        analyst_text = ""
+        if overview.analyst_top_list:
+            for an in overview.analyst_top_list[:5]:
+                analyst_text += f"- {an['name']}({an['company']}): 年度指数{an['index']:.0f}, 收益率{an['year_yield']:.1f}%, 推荐{an['latest_stock']}\n"
+        
+        # 潜力股数据（资金流入但热度不高）
+        hidden_inflow_text = ""
+        if overview.hidden_inflow_stocks:
+            hidden_inflow_text = "| 代码 | 名称 | 大笔买入 | 关注指数 | 综合得分 | 今日涨跌 | 板块 |\n"
+            hidden_inflow_text += "|------|------|----------|----------|----------|----------|------|\n"
+            for stock in overview.hidden_inflow_stocks[:8]:
+                hidden_inflow_text += (f"| {stock['code']} | {stock['name']} | "
+                                      f"{stock['big_buy_count']}次 | {stock['attention']:.0f} | "
+                                      f"{stock['score']:.0f} | {stock['change_pct']:+.2f}% | "
+                                      f"{stock['sector']} |\n")
+        
+        # AI潜力股分析结论
+        hidden_inflow_analysis_text = overview.hidden_inflow_analysis if overview.hidden_inflow_analysis else ""
         
         prompt = f"""你是一位专业的A股市场分析师，请根据提供的多维度数据生成一份深度大盘复盘报告。
 
@@ -831,7 +1815,70 @@ A股 政策 利好 最新消息
 ## 五、龙虎榜（净买入: {overview.lhb_net_buy:.2f}亿）
 {lhb_text if lhb_text else "今日无龙虎榜数据"}
 
-## 六、市场新闻
+## 六、涨停板行情（重要情绪指标）
+
+### 涨停股池（{overview.zt_pool_count}只）
+- 首板: {overview.zt_first_board_count}只
+- 连板: {overview.zt_continuous_count}只
+- 最高连板: {overview.zt_max_continuous}板
+- 涨停股总成交额: {overview.zt_total_amount:.0f}亿
+- 平均换手率: {overview.zt_avg_turnover:.1f}%
+
+**连板龙头:**
+{zt_pool_text if zt_pool_text else "暂无数据"}
+
+### 昨日涨停今日表现（溢价率: {overview.previous_zt_avg_change:+.2f}%）
+- 昨日涨停: {overview.previous_zt_count}只
+- 今日上涨: {overview.previous_zt_up_count}只
+- 今日下跌: {overview.previous_zt_down_count}只
+{previous_zt_text if previous_zt_text else ""}
+
+### 炸板股池（炸板率: {overview.zb_rate:.1f}%）
+- 炸板股: {overview.zb_pool_count}只
+- 炸板总次数: {overview.zb_total_count}次
+{zb_text if zb_text else ""}
+
+### 跌停股池（{overview.dt_pool_count}只）
+- 连续跌停: {overview.dt_continuous_count}只
+{dt_text if dt_text else ""}
+
+### 强势股池（{overview.strong_pool_count}只）
+- 60日新高: {overview.strong_new_high_count}只
+- 近期多次涨停: {overview.strong_multi_zt_count}只
+
+## 七、板块异动详情（总异动{overview.board_change_count}次）
+{board_change_text if board_change_text else "暂无板块异动数据"}
+
+## 八、盘口异动（买卖力量比: {buy_sell_ratio:.2f}）
+{pankou_text}
+{pankou_detail_text if pankou_detail_text else ""}
+
+## 九、千股千评（市场情绪参考）
+- 市场平均得分: {overview.comment_avg_score:.1f}
+- 高分股(>=80分): {overview.comment_high_score_count}只
+- 低分股(<=40分): {overview.comment_low_score_count}只
+
+**综合得分TOP5:**
+{comment_top_text if comment_top_text else "暂无数据"}
+
+**高关注度股票:**
+{attention_text if attention_text else "暂无数据"}
+
+## 十、分析师指数（机构观点参考）
+{analyst_text if analyst_text else "暂无数据"}
+
+## 十一、财新内容精选
+{caixin_text if caixin_text else "暂无财新数据"}
+
+## 十二、潜力股发现（资金流入但热度不高）
+
+以下股票满足条件：多次大笔买入 + 关注指数低于市场平均 + 今日涨幅不大 + 综合得分>=60
+
+{hidden_inflow_text if hidden_inflow_text else "暂无符合条件的潜力股"}
+
+{f"**AI深度分析:**{chr(10)}{hidden_inflow_analysis_text}" if hidden_inflow_analysis_text else ""}
+
+## 十三、市场新闻
 {news_text if news_text else "暂无相关新闻"}
 
 ---
@@ -839,11 +1886,17 @@ A股 政策 利好 最新消息
 # 分析要点
 
 请重点关注：
-1. 融资余额变化：杠杆资金是加仓还是减仓？
-2. 大宗交易折溢价：折价成交多说明大股东/机构在出货
-3. 龙虎榜机构动向：机构席位买入的板块往往是中期主线
-4. 概念板块轮动：哪些概念在持续发酵？哪些在退潮？
-5. 涨跌比与成交额：赚钱效应如何？量能是否配合？
+1. **涨停板行情**：连板高度、炸板率、溢价率是市场情绪的核心指标
+2. 融资余额变化：杠杆资金是加仓还是减仓？
+3. 大宗交易折溢价：折价成交多说明大股东/机构在出货
+4. 龙虎榜机构动向：机构席位买入的板块往往是中期主线
+5. 概念板块轮动：哪些概念在持续发酵？哪些在退潮？
+6. 涨跌比与成交额：赚钱效应如何？量能是否配合？
+7. **板块异动**：哪些板块异动频繁？主力资金在哪些板块活跃？
+8. **盘口异动**：大笔买入vs大笔卖出的力量对比
+9. **千股千评**：市场整体评分变化，高分股和低分股的分布
+10. **财新内容**：关注政策面、宏观经济的重要信息
+11. **潜力股发现**：资金流入但热度不高的股票，可能是主力建仓阶段
 
 ---
 
@@ -857,19 +1910,34 @@ A股 政策 利好 最新消息
 ### 二、指数点评
 （分析各指数走势特点，大小盘风格切换）
 
-### 三、资金动向解读
+### 三、涨停板情绪分析
+（分析连板高度、炸板率、溢价率，判断市场情绪）
+
+### 四、资金动向解读
 （综合分析融资融券、大宗交易的信号含义）
 
-### 四、热点解读
+### 五、热点解读
 （分析板块和概念背后的逻辑，判断持续性）
 
-### 五、龙虎榜点评
+### 六、龙虎榜点评
 （分析主力资金动向，机构偏好的方向）
 
-### 六、后市展望
+### 七、盘口异动分析
+（分析板块异动和盘口异动数据，判断主力动向）
+
+### 八、千股千评解读
+（分析市场整体评分，关注高分股和高关注度股票）
+
+### 九、财新要闻解读
+（解读财新内容中的重要政策和宏观信息）
+
+### 十、潜力股点评
+（分析资金流入但热度不高的股票，判断是否值得关注）
+
+### 十一、后市展望
 （给出明日市场预判和操作建议）
 
-### 七、风险提示
+### 十二、风险提示
 （需要关注的风险点）
 
 ---
@@ -905,6 +1973,37 @@ A股 政策 利好 最新消息
         top_text = "、".join([s['name'] for s in overview.top_sectors[:3]])
         bottom_text = "、".join([s['name'] for s in overview.bottom_sectors[:3]])
         
+        # 板块异动信息
+        board_change_text = ""
+        if overview.board_changes:
+            board_change_text = "\n### 六、板块异动\n"
+            for bc in overview.board_changes[:5]:
+                board_change_text += f"- **{bc['name']}**: 涨跌{bc['change_pct']:+.2f}%, 异动{bc['change_count']}次\n"
+        
+        # 盘口异动信息
+        pankou_text = ""
+        if overview.big_buy_count > 0 or overview.big_sell_count > 0:
+            pankou_text = f"""
+### 七、盘口异动
+| 类型 | 次数 |
+|------|------|
+| 大笔买入 | {overview.big_buy_count} |
+| 大笔卖出 | {overview.big_sell_count} |
+| 封涨停板 | {overview.limit_up_seal_count} |
+| 封跌停板 | {overview.limit_down_seal_count} |
+| 火箭发射 | {overview.rocket_launch_count} |
+| 高台跳水 | {overview.high_dive_count} |
+"""
+        
+        # 财新内容
+        caixin_text = ""
+        if overview.caixin_news:
+            caixin_text = "\n### 八、财新要闻\n"
+            for i, news_item in enumerate(overview.caixin_news[:5], 1):
+                tag = news_item.get('tag', '')
+                summary = news_item.get('summary', '')[:60]
+                caixin_text += f"{i}. [{tag}] {summary}\n"
+        
         report = f"""## 📊 {overview.date} 大盘复盘
 
 ### 一、市场总结
@@ -926,7 +2025,11 @@ A股 政策 利好 最新消息
 - **领涨**: {top_text}
 - **领跌**: {bottom_text}
 
-### 五、风险提示
+### 五、龙虎榜
+- 净买入: {overview.lhb_net_buy:.2f}亿
+- 上榜股票: {len(overview.lhb_stocks)}只
+{board_change_text}{pankou_text}{caixin_text}
+### 九、风险提示
 市场有风险，投资需谨慎。以上数据仅供参考，不构成投资建议。
 
 ---
