@@ -872,9 +872,6 @@ A股 政策 利好 最新消息
 ### 七、风险提示
 （需要关注的风险点）
 
-### 八、埋伏机会
-（符合"够便宜+有催化+有反转"逻辑的方向）
-
 ---
 
 请直接输出复盘报告内容。
@@ -1135,6 +1132,7 @@ class SectorOpportunityAnalyzer:
         self.analyzer = analyzer
         self._sw_info_cache: Optional[pd.DataFrame] = None
         self._industry_hist_cache: Dict[str, pd.DataFrame] = {}
+        self._em_industry_mapping: Optional[Dict[str, str]] = None  # 东财行业板块名称->代码映射缓存
         
     def _call_akshare_with_retry(self, fn, name: str, attempts: int = 2):
         """带重试的akshare调用"""
@@ -1150,12 +1148,75 @@ class SectorOpportunityAnalyzer:
         logger.error(f"[板块机会] {name} 最终失败: {last_error}")
         return None
     
+    def _get_em_industry_mapping(self) -> Dict[str, str]:
+        """
+        获取东财行业板块名称到代码的映射
+        
+        Returns:
+            {板块名称: 板块代码} 字典，如 {'小金属': 'BK1027', '银行': 'BK0475'}
+        """
+        if not hasattr(self, '_em_industry_mapping') or self._em_industry_mapping is None:
+            try:
+                df = self._call_akshare_with_retry(ak.stock_board_industry_name_em, "东财行业板块列表")
+                if df is not None and not df.empty:
+                    # 构建名称到代码的映射
+                    self._em_industry_mapping = {}
+                    for _, row in df.iterrows():
+                        name = str(row.get('板块名称', ''))
+                        code = str(row.get('板块代码', ''))
+                        if name and code:
+                            self._em_industry_mapping[name] = code
+                    logger.info(f"[板块机会] 缓存东财行业板块映射: {len(self._em_industry_mapping)} 个")
+                else:
+                    self._em_industry_mapping = {}
+            except Exception as e:
+                logger.warning(f"[板块机会] 获取东财行业板块映射失败: {e}")
+                self._em_industry_mapping = {}
+        
+        return self._em_industry_mapping
+    
+    def _find_em_sector(self, sector_name: str) -> Optional[str]:
+        """
+        根据申万行业名称查找对应的东财板块名称或代码
+        
+        Args:
+            sector_name: 申万行业名称（如"银行"、"有色金属"）
+            
+        Returns:
+            东财板块名称或代码，找不到返回 None
+        """
+        mapping = self._get_em_industry_mapping()
+        if not mapping:
+            return None
+        
+        # 1. 精确匹配
+        if sector_name in mapping:
+            return sector_name
+        
+        # 2. 模糊匹配（申万名称可能与东财名称略有不同）
+        for em_name in mapping.keys():
+            # 包含关系匹配
+            if sector_name in em_name or em_name in sector_name:
+                logger.debug(f"[板块机会] 板块名称匹配: {sector_name} -> {em_name}")
+                return em_name
+            # 前两个字匹配
+            if len(sector_name) >= 2 and len(em_name) >= 2 and sector_name[:2] == em_name[:2]:
+                logger.debug(f"[板块机会] 板块名称前缀匹配: {sector_name} -> {em_name}")
+                return em_name
+        
+        return None
+    
     def _get_sector_constituents(self, sector_name: str, top_n: int = 5) -> List[Dict[str, Any]]:
         """
         获取板块成分股（按市值排序取前N只）
         
+        优化策略：
+        1. 先从缓存的东财板块映射中查找正确的板块名称
+        2. 使用正确的板块名称查询成分股
+        3. 支持传入板块代码（如 BK1027）
+        
         Args:
-            sector_name: 板块名称（东财行业板块名称）
+            sector_name: 板块名称（申万或东财行业板块名称）
             top_n: 获取前N只股票
             
         Returns:
@@ -1164,26 +1225,15 @@ class SectorOpportunityAnalyzer:
         try:
             logger.debug(f"[板块机会] 获取 {sector_name} 成分股...")
             
-            # 尝试直接获取
-            df = self._call_akshare_with_retry(
-                lambda: ak.stock_board_industry_cons_em(symbol=sector_name),
-                f"{sector_name}成分股"
-            )
+            # 查找正确的东财板块名称
+            em_sector = self._find_em_sector(sector_name)
+            query_name = em_sector if em_sector else sector_name
             
-            # 如果直接获取失败，尝试模糊匹配
-            if df is None or df.empty:
-                # 获取所有行业板块列表
-                industry_df = self._call_akshare_with_retry(ak.stock_board_industry_name_em, "行业板块列表")
-                if industry_df is not None and not industry_df.empty:
-                    # 模糊匹配板块名称
-                    matched = industry_df[industry_df['板块名称'].str.contains(sector_name[:2], na=False)]
-                    if not matched.empty:
-                        matched_name = matched.iloc[0]['板块名称']
-                        logger.debug(f"[板块机会] 模糊匹配: {sector_name} -> {matched_name}")
-                        df = self._call_akshare_with_retry(
-                            lambda: ak.stock_board_industry_cons_em(symbol=matched_name),
-                            f"{matched_name}成分股"
-                        )
+            # 获取成分股
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_board_industry_cons_em(symbol=query_name),
+                f"{query_name}成分股"
+            )
             
             if df is None or df.empty:
                 logger.warning(f"[板块机会] {sector_name} 成分股数据为空")
@@ -1229,7 +1279,7 @@ class SectorOpportunityAnalyzer:
             sector_name = em_sector_name or opp.sector_name
             
             # 获取板块龙头股（前5只）
-            constituents = self._get_sector_constituents(sector_name, top_n=5)
+            constituents = self._get_sector_constituents(sector_name, top_n=10)
             
             if not constituents:
                 logger.debug(f"[板块机会] {opp.sector_name} 无法获取成分股，跳过筹码分析")
@@ -1237,13 +1287,13 @@ class SectorOpportunityAnalyzer:
             
             # 导入 AkshareFetcher 获取筹码数据
             from data_provider.akshare_fetcher import AkshareFetcher
-            fetcher = AkshareFetcher(sleep_min=0.5, sleep_max=1.0)  # 减少等待时间
+            fetcher = AkshareFetcher(sleep_min=1, sleep_max=1.5)  # 减少等待时间
             
             chip_data_list = []
             leader_chip = None
             leader_name = ""
             
-            for i, stock in enumerate(constituents[:3]):  # 只分析前3只，避免API调用过多
+            for i, stock in enumerate(constituents[:5]):  # 只分析前3只，避免API调用过多
                 code = stock['code']
                 name = stock['name']
                 
