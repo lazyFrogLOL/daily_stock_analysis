@@ -68,7 +68,6 @@ class MarketOverview:
     limit_up_count: int = 0             # 涨停家数
     limit_down_count: int = 0           # 跌停家数
     total_amount: float = 0.0           # 两市成交额（亿元）
-    north_flow: float = 0.0             # 北向资金净流入（亿元）
     
     # 板块涨幅榜
     top_sectors: List[Dict] = field(default_factory=list)     # 涨幅前5板块
@@ -95,6 +94,17 @@ class MarketAnalyzer:
         'sh000688': '科创50',
         'sh000016': '上证50',
         'sh000300': '沪深300',
+        'sh000015': '红利指数',
+        'sh000905': '中证500',
+        'sh000906': '中证800',
+        'sz399012': '创业300',
+        'sz399303': '国证2000',
+        'sz399372': '大盘成长',
+        'sz399373': '大盘价值',
+        'sz399374': '中盘成长',
+        'sz399375': '中盘价值',
+        'sz399376': '小盘成长',
+        'sz399377': '小盘价值'
     }
     
     def __init__(self, search_service: Optional[SearchService] = None, analyzer=None):
@@ -127,9 +137,6 @@ class MarketAnalyzer:
         
         # 3. 获取板块涨跌榜
         self._get_sector_rankings(overview)
-        
-        # 4. 获取北向资金（可选）
-        # self._get_north_flow(overview)
         
         return overview
 
@@ -258,27 +265,7 @@ class MarketAnalyzer:
                     
         except Exception as e:
             logger.error(f"[大盘] 获取板块涨跌榜失败: {e}")
-    
-    # def _get_north_flow(self, overview: MarketOverview):
-    #     """获取北向资金流入"""
-    #     try:
-    #         logger.info("[大盘] 获取北向资金...")
-            
-    #         # 获取北向资金数据
-    #         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
-            
-    #         if df is not None and not df.empty:
-    #             # 取最新一条数据
-    #             latest = df.iloc[-1]
-    #             if '当日净流入' in df.columns:
-    #                 overview.north_flow = float(latest['当日净流入']) / 1e8  # 转为亿元
-    #             elif '净流入' in df.columns:
-    #                 overview.north_flow = float(latest['净流入']) / 1e8
-                    
-    #             logger.info(f"[大盘] 北向资金净流入: {overview.north_flow:.2f}亿")
-                
-    #     except Exception as e:
-    #         logger.warning(f"[大盘] 获取北向资金失败: {e}")
+
     
     def search_market_news(self) -> List[Dict]:
         """
@@ -347,20 +334,11 @@ class MarketAnalyzer:
             
             generation_config = {
                 'temperature': 0.7,
-                'max_output_tokens': 2048,
+                'max_output_tokens': 8192,
             }
             
-            # 根据 analyzer 使用的 API 类型调用
-            if self.analyzer._use_openai:
-                # 使用 OpenAI 兼容 API
-                review = self.analyzer._call_openai_api(prompt, generation_config)
-            else:
-                # 使用 Gemini API
-                response = self.analyzer._model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                )
-                review = response.text.strip() if response and response.text else None
+            # 使用 OpenAI 兼容 API
+            review = self.analyzer._call_openai_api(prompt, generation_config)
             
             if review:
                 logger.info(f"[大盘] 复盘报告生成成功，长度: {len(review)} 字符")
@@ -397,7 +375,19 @@ class MarketAnalyzer:
                 snippet = n.get('snippet', '')[:100]
             news_text += f"{i}. {title}\n   {snippet}\n"
         
-        prompt = f"""你是一位专业的A股市场分析师，请根据以下数据生成一份简洁的大盘复盘报告。
+        prompt = f"""你是一位专业的A股市场分析师，请根据提供的数据生成一份简洁的大盘复盘报告。
+
+您深谙A股埋伏心法，擅长在市场共识尚未形成、估值处于低位、但基本面或政策面即将发生边际变化时提前布局。
+
+在A股埋伏，必须同时满足以下三个条件中的至少两个，胜率才高：
+
+1. 够便宜（安全垫）：经历了长时间调整，机构仓位低，散户绝望，估值在历史底部。
+
+2. 有催化（导火索）：未来3-6个月内有确定的政策预期（如“十五五”规划前瞻）、技术突破或产品落地。
+
+3. 有反转（基本面）：行业供需格局改善，从“杀估值”转向“杀业绩”结束，进入业绩修复期。
+
+您可以在网络上搜索更全面的信息。
 
 【重要】输出要求：
 - 必须输出纯 Markdown 文本格式
@@ -419,7 +409,6 @@ class MarketAnalyzer:
 - 上涨: {overview.up_count} 家 | 下跌: {overview.down_count} 家 | 平盘: {overview.flat_count} 家
 - 涨停: {overview.limit_up_count} 家 | 跌停: {overview.limit_down_count} 家
 - 两市成交额: {overview.total_amount:.0f} 亿元
-- 北向资金: {overview.north_flow:+.2f} 亿元
 
 ## 板块表现
 领涨: {top_sectors_text}
@@ -441,7 +430,7 @@ class MarketAnalyzer:
 （分析上证、深证、创业板等各指数走势特点）
 
 ### 三、资金动向
-（解读成交额和北向资金流向的含义）
+（解读成交额含义）
 
 ### 四、热点解读
 （分析领涨领跌板块背后的逻辑和驱动因素）
@@ -501,7 +490,6 @@ class MarketAnalyzer:
 | 涨停 | {overview.limit_up_count} |
 | 跌停 | {overview.limit_down_count} |
 | 两市成交额 | {overview.total_amount:.0f}亿 |
-| 北向资金 | {overview.north_flow:+.2f}亿 |
 
 ### 四、板块表现
 - **领涨**: {top_text}
