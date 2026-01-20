@@ -43,49 +43,43 @@ jobs:
       
       - name: 执行股票分析
         env:
-          # Gemini AI
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-          GEMINI_MODEL_FALLBACK: ${{ secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
-          GEMINI_REQUEST_DELAY: '3.0'  # GitHub Actions 建议增加延时
-          
-          # 数据源 (可选)
-          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-          
-          # 搜索服务
-          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
-          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
-          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
-          
-          # OpenAI 兼容 API（备选）
+          # ========== AI 分析服务（OpenAI 兼容 API）==========
+          # 支持 OpenAI、DeepSeek、通义千问、Moonshot 等
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_REQUEST_DELAY: '2.0'
           
-          # 通知渠道（可同时配置多个，全部推送）
-          # 方式一：企业微信
+          # ========== 搜索服务 ==========
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          # 备选搜索引擎（可选）
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          
+          # ========== 数据源（可选）==========
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          
+          # ========== 通知渠道（可同时配置多个）==========
+          # 企业微信
           WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
-          # 方式二：飞书
+          # 飞书 Webhook
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          # 方式三：Telegram（需同时配置 Bot Token 和 Chat ID）
+          # Telegram
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 方式四：邮件（只需邮箱和授权码，SMTP自动识别）
+          # 邮件
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-          # 方式五：自定义 Webhook（支持钉钉、Discord、Slack、Bark等，多个用逗号分隔）
+          # 自定义 Webhook（钉钉、Discord、Slack 等）
           CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
-          # 方式六：飞书文档
+          # 飞书文档
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
-
           
-          # 自选股列表 (从 secrets 或使用默认值)
+          # ========== 其他配置 ==========
           STOCK_LIST: ${{ secrets.STOCK_LIST || '600519' }}
-          
-          # 其他配置
           LOG_LEVEL: INFO
           DATA_DAYS: 60
           MAX_CONCURRENT: 3
@@ -97,8 +91,12 @@ jobs:
           echo "运行模式: $MODE"
           echo "自选股: $STOCK_LIST"
           echo "时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
-          echo "BOCHA_API_KEYS 是否配置: $([ -n "$BOCHA_API_KEYS" ] && echo '是' || echo '否')"
-          echo "BOCHA_API_KEYS 长度: ${#BOCHA_API_KEYS}"
+          echo "=========================================="
+          echo "配置检查:"
+          echo "  OPENAI_API_KEY: $([ -n "$OPENAI_API_KEY" ] && echo '已配置' || echo '未配置')"
+          echo "  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-未配置}"
+          echo "  OPENAI_MODEL: ${OPENAI_MODEL:-未配置}"
+          echo "  TAVILY_API_KEYS: $([ -n "$TAVILY_API_KEYS" ] && echo '已配置' || echo '未配置')"
           echo "=========================================="
           
           if [ "$MODE" = "market-only" ]; then

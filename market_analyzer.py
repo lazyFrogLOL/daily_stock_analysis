@@ -1208,19 +1208,19 @@ class SectorOpportunityAnalyzer:
     
     def _get_sector_constituents(self, sector_name: str, top_n: int = 5) -> List[Dict[str, Any]]:
         """
-        获取板块成分股（按市值排序取前N只）
+        获取板块成分股（按成交额排序取前N只）
         
         优化策略：
         1. 先从缓存的东财板块映射中查找正确的板块名称
         2. 使用正确的板块名称查询成分股
-        3. 支持传入板块代码（如 BK1027）
+        3. 按成交额排序（成交额大的通常是龙头或热门股）
         
         Args:
             sector_name: 板块名称（申万或东财行业板块名称）
             top_n: 获取前N只股票
             
         Returns:
-            成分股列表，每个元素包含 code, name, market_cap
+            成分股列表，每个元素包含 code, name, amount(成交额), change_pct(涨跌幅)
         """
         try:
             logger.debug(f"[板块机会] 获取 {sector_name} 成分股...")
@@ -1239,10 +1239,11 @@ class SectorOpportunityAnalyzer:
                 logger.warning(f"[板块机会] {sector_name} 成分股数据为空")
                 return []
             
-            # 按总市值排序（如果有该列）
-            if '总市值' in df.columns:
-                df['总市值'] = pd.to_numeric(df['总市值'], errors='coerce')
-                df = df.sort_values('总市值', ascending=False)
+            # 按成交额排序（成交额大的通常是龙头股或热门股）
+            # 东财返回的列名：代码, 名称, 最新价, 涨跌幅, 成交量, 成交额, 换手率, 市盈率-动态, 市净率
+            if '成交额' in df.columns:
+                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
+                df = df.sort_values('成交额', ascending=False)
             
             # 取前N只
             result = []
@@ -1250,10 +1251,12 @@ class SectorOpportunityAnalyzer:
                 result.append({
                     'code': str(row.get('代码', '')),
                     'name': str(row.get('名称', '')),
-                    'market_cap': float(row.get('总市值', 0) or 0),
+                    'amount': float(row.get('成交额', 0) or 0),
+                    'change_pct': float(row.get('涨跌幅', 0) or 0),
+                    'turnover_rate': float(row.get('换手率', 0) or 0),
                 })
             
-            logger.debug(f"[板块机会] {sector_name} 获取到 {len(result)} 只成分股")
+            logger.debug(f"[板块机会] {sector_name} 获取到 {len(result)} 只成分股（按成交额排序）")
             return result
             
         except Exception as e:
@@ -1265,10 +1268,10 @@ class SectorOpportunityAnalyzer:
         分析板块筹码集中度
         
         策略：
-        1. 获取板块前3-5只龙头股（按市值）
-        2. 获取每只股票的筹码分布数据
+        1. 获取板块成分股（按成交额排序，成交额最大的视为龙头/热门股）
+        2. 获取前3-5只股票的筹码分布数据
         3. 计算板块平均筹码集中度和获利比例
-        4. 识别龙头股的筹码状态
+        4. 识别龙头股（成交额最大）的筹码状态
         
         Args:
             opp: 板块机会对象
@@ -1278,7 +1281,7 @@ class SectorOpportunityAnalyzer:
             # 使用东财板块名称获取成分股
             sector_name = em_sector_name or opp.sector_name
             
-            # 获取板块龙头股（前5只）
+            # 获取板块成分股（按成交额排序，前10只）
             constituents = self._get_sector_constituents(sector_name, top_n=10)
             
             if not constituents:
@@ -1287,15 +1290,18 @@ class SectorOpportunityAnalyzer:
             
             # 导入 AkshareFetcher 获取筹码数据
             from data_provider.akshare_fetcher import AkshareFetcher
-            fetcher = AkshareFetcher(sleep_min=1, sleep_max=1.5)  # 减少等待时间
+            fetcher = AkshareFetcher(sleep_min=1, sleep_max=1.5)
             
             chip_data_list = []
             leader_chip = None
             leader_name = ""
+            leader_amount = 0
             
-            for i, stock in enumerate(constituents[:5]):  # 只分析前3只，避免API调用过多
+            # 分析前5只股票（按成交额排序的）
+            for i, stock in enumerate(constituents[:5]):
                 code = stock['code']
                 name = stock['name']
+                amount = stock.get('amount', 0)
                 
                 try:
                     chip = fetcher.get_chip_distribution(code)
@@ -1303,13 +1309,15 @@ class SectorOpportunityAnalyzer:
                         chip_data_list.append({
                             'code': code,
                             'name': name,
+                            'amount': amount,
                             'concentration_90': chip.concentration_90,
                             'profit_ratio': chip.profit_ratio,
                             'avg_cost': chip.avg_cost,
                         })
                         
-                        # 第一只就是龙头股
-                        if i == 0:
+                        # 成交额最大的作为龙头股
+                        if amount > leader_amount:
+                            leader_amount = amount
                             leader_chip = chip
                             leader_name = name
                             
@@ -1362,7 +1370,7 @@ class SectorOpportunityAnalyzer:
             opp.chip_analysis = "，".join(analysis_parts)
             
             logger.info(f"[板块机会] {opp.sector_name} 筹码分析: 平均集中度={avg_concentration:.1%}, "
-                       f"平均获利比例={avg_profit:.1%}, 龙头={leader_name}")
+                       f"平均获利比例={avg_profit:.1%}, 龙头={leader_name}(成交额最大)")
             
         except Exception as e:
             logger.warning(f"[板块机会] {opp.sector_name} 筹码分析失败: {e}")
