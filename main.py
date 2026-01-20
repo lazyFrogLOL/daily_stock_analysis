@@ -715,6 +715,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     
     parser.add_argument(
+        '--date',
+        type=str,
+        default=None,
+        help='指定复盘日期，格式 YYYY-MM-DD（默认为今天）'
+    )
+    
+    parser.add_argument(
         '--no-market-review',
         action='store_true',
         help='跳过大盘复盘分析'
@@ -729,7 +736,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_market_review(notifier: NotificationService, analyzer=None, search_service=None) -> Optional[str]:
+def run_market_review(notifier: NotificationService, analyzer=None, search_service=None, target_date: Optional[str] = None) -> Optional[str]:
     """
     执行大盘复盘分析
     
@@ -737,11 +744,13 @@ def run_market_review(notifier: NotificationService, analyzer=None, search_servi
         notifier: 通知服务
         analyzer: AI分析器（可选）
         search_service: 搜索服务（可选）
+        target_date: 目标日期，格式 'YYYY-MM-DD'（可选，默认为今天）
     
     Returns:
         复盘报告文本
     """
-    logger.info("开始执行大盘复盘分析...")
+    date_display = target_date or datetime.now().strftime('%Y-%m-%d')
+    logger.info(f"开始执行大盘复盘分析 ({date_display})...")
     
     try:
         market_analyzer = MarketAnalyzer(
@@ -749,15 +758,15 @@ def run_market_review(notifier: NotificationService, analyzer=None, search_servi
             analyzer=analyzer
         )
         
-        # 执行复盘
-        review_report = market_analyzer.run_daily_review()
+        # 执行复盘（传入日期参数）
+        review_report = market_analyzer.run_daily_review(target_date)
         
         if review_report:
             # 保存报告到文件
-            date_str = datetime.now().strftime('%Y%m%d')
+            date_str = (target_date or datetime.now().strftime('%Y-%m-%d')).replace('-', '')
             report_filename = f"market_review_{date_str}.md"
             filepath = notifier.save_report_to_file(
-                f"# 🎯 大盘复盘\n\n{review_report}", 
+                f"# 🎯 大盘复盘 ({date_display})\n\n{review_report}", 
                 report_filename
             )
             logger.info(f"大盘复盘报告已保存: {filepath}")
@@ -765,7 +774,7 @@ def run_market_review(notifier: NotificationService, analyzer=None, search_servi
             # 推送通知
             if notifier.is_available():
                 # 添加标题
-                report_content = f"🎯 大盘复盘\n\n{review_report}"
+                report_content = f"🎯 大盘复盘 ({date_display})\n\n{review_report}"
                 
                 success = notifier.send(report_content)
                 if success:
@@ -918,6 +927,8 @@ def main() -> int:
         # 模式1: 仅大盘复盘
         if args.market_review:
             logger.info("模式: 仅大盘复盘")
+            if args.date:
+                logger.info(f"指定日期: {args.date}")
             notifier = NotificationService()
             
             # 初始化搜索服务和分析器（如果有配置）
@@ -931,10 +942,10 @@ def main() -> int:
                     serpapi_keys=config.serpapi_keys
                 )
             
-            if config.gemini_api_key:
-                analyzer = GeminiAnalyzer(api_key=config.gemini_api_key)
+            if config.openai_api_key:
+                analyzer = GeminiAnalyzer()
             
-            run_market_review(notifier, analyzer, search_service)
+            run_market_review(notifier, analyzer, search_service, target_date=args.date)
             return 0
         
         # 模式2: 定时任务模式
