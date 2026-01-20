@@ -21,6 +21,7 @@ on:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    environment: env  # 使用名为 "env" 的环境（与你配置的 Environment 名称一致）
     
     steps:
       - name: 检出代码
