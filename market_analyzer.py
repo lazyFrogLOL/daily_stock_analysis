@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-大盘复盘分析模块
+大盘数据获取模块
 ===================================
 
 职责：
-1. 获取大盘指数数据（上证、深证、创业板）
-2. 搜索市场新闻形成复盘情报
-3. 使用大模型生成每日大盘复盘报告
+1. 获取大盘指数数据（上证、深证、创业板等）
+2. 获取市场涨跌统计、板块数据、资金数据等
+3. 搜索市场新闻
+
+注意：
+- 本模块只负责数据获取和存储
+- LLM 分析和报告生成已移至 llm_mapreduce.py
 """
 
 import logging
@@ -85,6 +89,8 @@ class MarketOverview:
     lhb_net_buy: float = 0.0            # 龙虎榜净买入（亿元）
     lhb_org_buy_count: int = 0          # 机构买入次数
     lhb_org_sell_count: int = 0         # 机构卖出次数
+    lhb_org_net_buy: float = 0.0        # 机构净买入金额（亿元）
+    lhb_seat_detail: List[Dict] = field(default_factory=list) # 龙虎榜席位明细
     
     # 大宗交易
     block_trade_amount: float = 0.0     # 大宗交易成交额（亿元）
@@ -179,11 +185,22 @@ class MarketOverview:
     # 低热度资金流入股票
     hidden_inflow_stocks: List[Dict] = field(default_factory=list)  # 资金流入但热度低的股票
     hidden_inflow_analysis: str = ""    # AI分析结论
+    
+    # ========== 板块埋伏机会数据 ==========
+    
+    # 申万行业估值数据
+    sector_opportunities: List[Dict] = field(default_factory=list)  # 板块机会列表（按总分排序）
+    sector_cheap_list: List[Dict] = field(default_factory=list)     # 估值最低板块TOP5
+    sector_catalyst_list: List[Dict] = field(default_factory=list)  # 有催化板块TOP5
+    sector_reversal_list: List[Dict] = field(default_factory=list)  # 有反转信号板块TOP5
+    sector_recommended: List[Dict] = field(default_factory=list)    # 推荐埋伏板块（总分>=4）
 
 
 class MarketAnalyzer:
     """
-    大盘复盘分析器
+    大盘数据获取器
+    
+    职责：只负责获取市场数据，不生成报告
     
     功能：
     1. 获取大盘指数实时行情
@@ -201,9 +218,10 @@ class MarketAnalyzer:
     13. 获取分析师指数
     14. 挖掘潜力股（资金流入但热度不高）
     15. 搜索市场新闻
-    16. 生成大盘复盘报告
     
-    注意：北向资金数据已于2024年停止更新，不再获取
+    注意：
+    - 北向资金数据已于2024年停止更新，不再获取
+    - 报告生成请使用 llm_mapreduce.py
     """
     
     # 主要指数代码
@@ -217,7 +235,6 @@ class MarketAnalyzer:
         'sh000015': '红利指数',
         'sh000905': '中证500',
         'sh000906': '中证800',
-        'sz399012': '创业300',
         'sz399303': '国证2000',
         'sz399372': '大盘成长',
         'sz399373': '大盘价值',
@@ -229,15 +246,15 @@ class MarketAnalyzer:
     
     def __init__(self, search_service: Optional[SearchService] = None, analyzer=None):
         """
-        初始化大盘分析器
+        初始化大盘数据获取器
         
         Args:
-            search_service: 搜索服务实例
-            analyzer: AI分析器实例（用于调用LLM）
+            search_service: 搜索服务实例（用于搜索新闻）
+            analyzer: AI分析器实例（已废弃，保留参数兼容性，LLM分析请使用 llm_mapreduce.py）
         """
         self.config = get_config()
         self.search_service = search_service
-        self.analyzer = analyzer
+        self.analyzer = analyzer  # 保留兼容性，但不再使用
         
     def get_market_overview(self, target_date: Optional[str] = None) -> MarketOverview:
         """
@@ -289,8 +306,10 @@ class MarketAnalyzer:
             
             # 潜力股挖掘：资金流入但热度不高的股票
             overview.hidden_inflow_stocks = self._find_hidden_inflow_stocks(overview)
-            if overview.hidden_inflow_stocks:
-                overview.hidden_inflow_analysis = self._analyze_hidden_inflow_with_llm(overview)
+            # 注意：LLM 分析已移至 llm_mapreduce.py，这里只获取数据
+            
+            # 板块埋伏机会数据
+            self._get_sector_opportunity_data(overview)
         
         return overview
 
@@ -303,7 +322,7 @@ class MarketAnalyzer:
                 last_error = e
                 logger.warning(f"[大盘] {name} 获取失败 (attempt {attempt}/{attempts}): {e}")
                 if attempt < attempts:
-                    time.sleep(min(2 ** attempt, 5))
+                    time.sleep(min(5 ** attempt, 20))
         logger.error(f"[大盘] {name} 最终失败: {last_error}")
         return None
     
@@ -482,12 +501,23 @@ class MarketAnalyzer:
             logger.error(f"[大盘] 获取涨跌统计失败: {e}")
     
     def _get_sector_rankings(self, overview: MarketOverview):
-        """获取板块涨跌榜"""
+        """
+        获取板块涨跌榜
+        
+        数据来源：同花顺-同花顺行业一览表
+        https://q.10jqka.com.cn/thshy/
+        
+        API: stock_board_industry_summary_ths
+        
+        输出字段：
+        - 板块、涨跌幅、总成交量(万手)、总成交额(亿元)、净流入(亿元)
+        - 上涨家数、下跌家数、均价、领涨股、领涨股-最新价、领涨股-涨跌幅
+        """
         try:
-            logger.info("[大盘] 获取板块涨跌榜...")
+            logger.info("[大盘] 获取板块涨跌榜（同花顺）...")
             
-            # 获取行业板块行情
-            df = self._call_akshare_with_retry(ak.stock_board_industry_name_em, "行业板块行情", attempts=2)
+            # 使用同花顺行业一览表接口
+            df = self._call_akshare_with_retry(ak.stock_board_industry_summary_ths, "同花顺行业板块", attempts=2)
             
             if df is not None and not df.empty:
                 change_col = '涨跌幅'
@@ -498,14 +528,32 @@ class MarketAnalyzer:
                     # 涨幅前5
                     top = df.nlargest(5, change_col)
                     overview.top_sectors = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
+                        {
+                            'name': row['板块'],
+                            'change_pct': row[change_col],
+                            'net_inflow': float(row.get('净流入', 0) or 0),  # 净流入（亿元）
+                            'amount': float(row.get('总成交额', 0) or 0),  # 成交额（亿元）
+                            'up_count': int(row.get('上涨家数', 0) or 0),
+                            'down_count': int(row.get('下跌家数', 0) or 0),
+                            'leader_stock': str(row.get('领涨股', '')),
+                            'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
+                        }
                         for _, row in top.iterrows()
                     ]
                     
                     # 跌幅前5
                     bottom = df.nsmallest(5, change_col)
                     overview.bottom_sectors = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
+                        {
+                            'name': row['板块'],
+                            'change_pct': row[change_col],
+                            'net_inflow': float(row.get('净流入', 0) or 0),
+                            'amount': float(row.get('总成交额', 0) or 0),
+                            'up_count': int(row.get('上涨家数', 0) or 0),
+                            'down_count': int(row.get('下跌家数', 0) or 0),
+                            'leader_stock': str(row.get('领涨股', '')),
+                            'leader_change': float(row.get('领涨股-涨跌幅', 0) or 0),
+                        }
                         for _, row in bottom.iterrows()
                     ]
                     
@@ -516,37 +564,78 @@ class MarketAnalyzer:
             logger.error(f"[大盘] 获取板块涨跌榜失败: {e}")
     
     def _get_concept_rankings(self, overview: MarketOverview):
-        """获取概念板块热点"""
+        """
+        获取概念板块热点
+        
+        数据来源：同花顺
+        - stock_board_concept_name_ths: 获取概念名称列表
+        - stock_board_concept_info_ths: 获取单个概念详情（含涨跌幅）
+        
+        注意：由于需要逐个调用获取涨跌幅，为提高效率只获取部分概念
+        """
         try:
-            logger.info("[大盘] 获取概念板块热点...")
+            logger.info("[大盘] 获取概念板块热点（同花顺）...")
             
-            # 获取概念板块行情
-            df = self._call_akshare_with_retry(ak.stock_board_concept_name_em, "概念板块行情", attempts=2)
+            # 1. 获取概念名称列表
+            name_df = self._call_akshare_with_retry(ak.stock_board_concept_name_ths, "同花顺概念名称", attempts=2)
             
-            if df is not None and not df.empty:
-                change_col = '涨跌幅'
-                if change_col in df.columns:
-                    df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
-                    df = df.dropna(subset=[change_col])
-                    
-                    # 涨幅前5概念
-                    top = df.nlargest(5, change_col)
-                    overview.top_concepts = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
-                        for _, row in top.iterrows()
-                    ]
-                    
-                    # 跌幅前5概念
-                    bottom = df.nsmallest(5, change_col)
-                    overview.bottom_concepts = [
-                        {'name': row['板块名称'], 'change_pct': row[change_col]}
-                        for _, row in bottom.iterrows()
-                    ]
-                    
-                    logger.info(f"[大盘] 热门概念: {[s['name'] for s in overview.top_concepts]}")
+            if name_df is None or name_df.empty:
+                logger.warning("[大盘] 概念板块名称列表为空")
+                return
+            
+            # 2. 获取部分概念的详情（限制数量避免请求过多）
+            # 随机抽取或取前N个概念
+            concept_names = name_df['name'].tolist() # 只取前50个概念
+            
+            concept_data = []
+            for concept_name in concept_names:
+                try:
+                    info_df = ak.stock_board_concept_info_ths(symbol=concept_name)
+                    if info_df is not None and not info_df.empty:
+                        # 解析数据
+                        info_dict = dict(zip(info_df['项目'], info_df['值']))
+                        change_pct_str = str(info_dict.get('板块涨幅', '0%'))
+                        # 解析涨跌幅（格式如 "-4.96%"）
+                        change_pct = float(change_pct_str.replace('%', '')) if change_pct_str else 0.0
+                        
+                        # 解析涨跌家数（格式如 "25/222"）
+                        up_down_str = str(info_dict.get('涨跌家数', '0/0'))
+                        up_down_parts = up_down_str.split('/')
+                        up_count = int(up_down_parts[0]) if len(up_down_parts) > 0 else 0
+                        down_count = int(up_down_parts[1]) if len(up_down_parts) > 1 else 0
+                        
+                        concept_data.append({
+                            'name': concept_name,
+                            'change_pct': change_pct,
+                            'net_inflow': float(info_dict.get('资金净流入(亿)', 0) or 0),
+                            'amount': float(info_dict.get('成交额(亿)', 0) or 0),
+                            'up_count': up_count,
+                            'down_count': down_count,
+                        })
+                except Exception as e:
+                    logger.debug(f"[大盘] 获取概念 {concept_name} 详情失败: {e}")
+                    continue
+                
+                # 避免请求过快
+                time.sleep(0.1)
+            
+            if not concept_data:
+                logger.warning("[大盘] 未获取到概念板块数据")
+                return
+            
+            # 3. 按涨跌幅排序
+            concept_data.sort(key=lambda x: x['change_pct'], reverse=True)
+            
+            # 涨幅前5
+            overview.top_concepts = concept_data[:10]
+            
+            # 跌幅前5
+            overview.bottom_concepts = concept_data[-10:][::-1]  # 倒序取最后5个
+            
+            logger.info(f"[大盘] 热门概念: {[s['name'] for s in overview.top_concepts]}")
                     
         except Exception as e:
-            logger.error(f"[大盘] 获取概念板块失败: {e}")
+            logger.warning(f"[大盘] 获取概念板块失败: {e}")
     
     def _get_margin_data(self, overview: MarketOverview, target_date: Optional[str] = None):
         """获取融资融券数据"""
@@ -588,7 +677,7 @@ class MarketAnalyzer:
     
     def _get_lhb_data(self, overview: MarketOverview, target_date: Optional[str] = None):
         """
-        获取龙虎榜数据
+        获取龙虎榜数据（增强版：含机构席位统计）
         
         注意：龙虎榜数据通常在收盘后才更新，当天数据可能不可用
         如果当天数据获取失败，会自动尝试获取前几个交易日的数据
@@ -604,6 +693,7 @@ class MarketAnalyzer:
             
             df = None
             actual_date = None
+            date_str = None
             
             # 尝试获取最近几天的数据（当天数据可能还没更新）
             for days_ago in range(0, 5):
@@ -640,11 +730,136 @@ class MarketAnalyzer:
                     overview.lhb_net_buy = df['龙虎榜净买额'].sum() / 1e8
                 
                 logger.info(f"[大盘] 龙虎榜({actual_date}): {len(df)}只股票上榜, 净买入: {overview.lhb_net_buy:.2f}亿")
+                
+                # ========== 获取机构买卖每日统计（新增）==========
+                self._get_lhb_org_stats(overview, date_str)
+                
+                # ========== 获取龙虎榜席位明细（新增）==========
+                self._get_lhb_seat_detail(overview, df, date_str)
+                
             else:
                 logger.warning("[大盘] 未能获取到龙虎榜数据")
                 
         except Exception as e:
             logger.warning(f"[大盘] 获取龙虎榜数据失败: {e}")
+    
+    def _get_lhb_org_stats(self, overview: MarketOverview, date_str: str):
+        """
+        获取龙虎榜机构买卖每日统计
+        
+        数据来源：东方财富网-数据中心-龙虎榜单-机构买卖每日统计
+        https://data.eastmoney.com/stock/jgmmtj.html
+        """
+        try:
+            logger.info("[大盘] 获取龙虎榜机构买卖统计...")
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_lhb_jgmmtj_em(start_date=date_str, end_date=date_str),
+                "机构买卖统计", attempts=2
+            )
+            
+            if df is not None and not df.empty:
+                # 统计机构买卖次数
+                if '买方机构数' in df.columns:
+                    df['买方机构数'] = pd.to_numeric(df['买方机构数'], errors='coerce')
+                    overview.lhb_org_buy_count = int(df['买方机构数'].sum())
+                
+                if '卖方机构数' in df.columns:
+                    df['卖方机构数'] = pd.to_numeric(df['卖方机构数'], errors='coerce')
+                    overview.lhb_org_sell_count = int(df['卖方机构数'].sum())
+                
+                # 机构净买入总额
+                org_net_buy = 0.0
+                if '机构买入净额' in df.columns:
+                    df['机构买入净额'] = pd.to_numeric(df['机构买入净额'], errors='coerce')
+                    org_net_buy = df['机构买入净额'].sum() / 1e8  # 转为亿元
+                
+                # 存储机构净买入金额
+                overview.lhb_org_net_buy = org_net_buy
+                
+                logger.info(f"[大盘] 机构买卖: 买入{overview.lhb_org_buy_count}次, "
+                           f"卖出{overview.lhb_org_sell_count}次, 净买入{org_net_buy:.2f}亿")
+                
+        except Exception as e:
+            logger.debug(f"[大盘] 获取机构买卖统计失败: {e}")
+    
+    def _get_lhb_seat_detail(self, overview: MarketOverview, lhb_df, date_str: str):
+        """
+        获取龙虎榜席位明细
+        
+        数据来源：东方财富网-数据中心-龙虎榜单-个股龙虎榜详情
+        https://data.eastmoney.com/stock/lhb/{symbol}.html
+        
+        API: stock_lhb_stock_detail_em
+        
+        获取上榜股票的买入和卖出席位明细，包括：
+        - 营业部名称（可判断是机构还是游资）
+        - 买入金额
+        - 卖出金额
+        - 净额
+        """
+        try:
+            logger.info("[大盘] 获取龙虎榜席位明细...")
+            
+            seat_details = []
+            
+            # 从龙虎榜股票中获取前10只股票的席位明细
+            stock_codes = lhb_df['代码'].head(10).tolist() if '代码' in lhb_df.columns else []
+            
+            for code in stock_codes:
+                try:
+                    # 获取买入席位
+                    buy_df = ak.stock_lhb_stock_detail_em(symbol=code, date=date_str, flag="买入")
+                    if buy_df is not None and not buy_df.empty:
+                        stock_name = lhb_df[lhb_df['代码'] == code]['名称'].iloc[0] if '名称' in lhb_df.columns else code
+                        for _, row in buy_df.iterrows():
+                            trader_name = str(row.get('交易营业部名称', ''))
+                            buy_amount = float(row.get('买入金额', 0) or 0) / 1e8  # 转为亿元
+                            sell_amount = float(row.get('卖出金额', 0) or 0) / 1e8
+                            net_amount = float(row.get('净额', 0) or 0) / 1e8
+                            
+                            seat_details.append({
+                                'stock_code': code,
+                                'stock_name': stock_name,
+                                'trader_name': trader_name,
+                                'buy_amount': buy_amount,
+                                'sell_amount': sell_amount,
+                                'net_amount': net_amount,
+                                'direction': '买入',
+                            })
+                    
+                    # 获取卖出席位
+                    sell_df = ak.stock_lhb_stock_detail_em(symbol=code, date=date_str, flag="卖出")
+                    if sell_df is not None and not sell_df.empty:
+                        stock_name = lhb_df[lhb_df['代码'] == code]['名称'].iloc[0] if '名称' in lhb_df.columns else code
+                        for _, row in sell_df.iterrows():
+                            trader_name = str(row.get('交易营业部名称', ''))
+                            buy_amount = float(row.get('买入金额', 0) or 0) / 1e8
+                            sell_amount = float(row.get('卖出金额', 0) or 0) / 1e8
+                            net_amount = float(row.get('净额', 0) or 0) / 1e8
+                            
+                            seat_details.append({
+                                'stock_code': code,
+                                'stock_name': stock_name,
+                                'trader_name': trader_name,
+                                'buy_amount': buy_amount,
+                                'sell_amount': sell_amount,
+                                'net_amount': net_amount,
+                                'direction': '卖出',
+                            })
+                            
+                except Exception as e:
+                    logger.debug(f"[大盘] 获取 {code} 席位明细失败: {e}")
+                    continue
+            
+            # 按净额绝对值排序，取前20条
+            seat_details.sort(key=lambda x: abs(x['net_amount']), reverse=True)
+            overview.lhb_seat_detail = seat_details[:20]
+            
+            logger.info(f"[大盘] 龙虎榜席位明细: 获取 {len(overview.lhb_seat_detail)} 条记录")
+                
+        except Exception as e:
+            logger.debug(f"[大盘] 获取龙虎榜席位明细失败: {e}")
     
     def _get_block_trade_data(self, overview: MarketOverview):
         """获取大宗交易数据"""
@@ -1069,7 +1284,9 @@ class MarketAnalyzer:
         数据来源：东方财富网-数据中心-特色数据-千股千评
         https://data.eastmoney.com/stockcomment/
         
-        包含：综合得分、机构参与度、关注指数等
+        API 返回字段：
+        - 代码、名称、最新价、涨跌幅、换手率、市盈率
+        - 主力成本、机构参与度、综合得分、上升、目前排名、关注指数、交易日
         """
         try:
             logger.info("[大盘] 获取千股千评数据...")
@@ -1092,8 +1309,11 @@ class MarketAnalyzer:
                             'name': str(row.get('名称', '')),
                             'score': float(row.get('综合得分', 0) or 0),
                             'rank': int(row.get('目前排名', 0) or 0),
+                            'rank_change': int(row.get('上升', 0) or 0),  # 排名变化（正=上升）
                             'change_pct': float(row.get('涨跌幅', 0) or 0),
+                            'turnover_rate': float(row.get('换手率', 0) or 0),
                             'org_participate': float(row.get('机构参与度', 0) or 0),
+                            'main_cost': float(row.get('主力成本', 0) or 0),
                         })
                     
                     # 综合得分最低10
@@ -1104,6 +1324,7 @@ class MarketAnalyzer:
                             'name': str(row.get('名称', '')),
                             'score': float(row.get('综合得分', 0) or 0),
                             'rank': int(row.get('目前排名', 0) or 0),
+                            'rank_change': int(row.get('上升', 0) or 0),
                             'change_pct': float(row.get('涨跌幅', 0) or 0),
                         })
                 
@@ -1118,6 +1339,7 @@ class MarketAnalyzer:
                             'attention': float(row.get('关注指数', 0) or 0),
                             'score': float(row.get('综合得分', 0) or 0),
                             'change_pct': float(row.get('涨跌幅', 0) or 0),
+                            'org_participate': float(row.get('机构参与度', 0) or 0),
                         })
                 
                 logger.info(f"[大盘] 千股千评: 平均得分{overview.comment_avg_score:.1f}, "
@@ -1180,27 +1402,26 @@ class MarketAnalyzer:
 
     def _find_hidden_inflow_stocks(self, overview: MarketOverview) -> List[Dict]:
         """
-        发现资金流入但热度不高的股票（潜力股挖掘）
+        获取有资金流入的股票原始数据（供 LLM 分析）
         
-        核心逻辑：
-        1. 从盘口异动-大笔买入中提取有资金流入的股票
-        2. 与千股千评数据交叉，筛选关注指数低的股票
-        3. 排除涨幅过大的股票（避免追高）
-        4. 获取股票的行业、市值等补充信息
+        职责：只负责数据获取和整合，不做筛选判断
         
-        筛选条件：
-        - 大笔买入次数 >= 2（资金持续流入）
-        - 关注指数 < 市场平均（热度不高）
-        - 今日涨跌幅 < 5%（未大幅拉升）
-        - 综合得分 >= 60（基本面不差）
+        数据来源：
+        1. 盘口异动-大笔买入：统计每只股票的大笔买入次数
+        2. 千股千评：获取关注指数、综合得分等指标
+        3. A股实时行情：补充市值、换手率等信息
+        
+        注意：
+        - 不做任何规则筛选，所有筛选逻辑由 llm_mapreduce.py 的 HiddenInflowAnalyst 完成
+        - 返回所有有大笔买入的股票数据，供 LLM 智能分析
         
         Returns:
-            潜力股列表，每个元素包含股票详细信息
+            股票数据列表，每个元素包含股票详细信息
         """
-        hidden_stocks = []
+        all_stocks = []
         
         try:
-            logger.info("[大盘] 开始挖掘资金流入但热度不高的股票...")
+            logger.info("[大盘] 获取资金流入股票数据...")
             
             # 1. 统计大笔买入股票的出现次数
             big_buy_stocks: Dict[str, Dict] = {}  # {code: {name, count, times, sector, info_list}}
@@ -1226,7 +1447,7 @@ class MarketAnalyzer:
                     big_buy_stocks[code]['info_list'].append(item.get('info', ''))
             
             if not big_buy_stocks:
-                logger.info("[大盘] 无大笔买入数据，跳过潜力股挖掘")
+                logger.info("[大盘] 无大笔买入数据")
                 return []
             
             logger.info(f"[大盘] 大笔买入股票: {len(big_buy_stocks)}只")
@@ -1234,241 +1455,177 @@ class MarketAnalyzer:
             # 2. 获取千股千评数据（用于关注指数和综合得分）
             comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
             
-            if comment_df is None or comment_df.empty:
-                logger.warning("[大盘] 无法获取千股千评数据")
-                return []
-            
-            # 计算市场平均关注指数
-            if '关注指数' in comment_df.columns:
+            # 计算市场平均关注指数（供 LLM 参考）
+            avg_attention = 50.0
+            if comment_df is not None and not comment_df.empty and '关注指数' in comment_df.columns:
                 comment_df['关注指数'] = pd.to_numeric(comment_df['关注指数'], errors='coerce')
                 avg_attention = comment_df['关注指数'].mean()
-            else:
-                avg_attention = 50.0
             
             logger.info(f"[大盘] 市场平均关注指数: {avg_attention:.1f}")
             
-            # 3. 交叉筛选：大笔买入 + 低关注度 + 低涨幅
+            # 3. 整合所有大笔买入股票的数据（不做筛选）
             for code, stock_info in big_buy_stocks.items():
-                # 至少2次大笔买入
-                if stock_info['count'] < 2:
-                    continue
-                
-                # 查找千股千评数据
-                stock_comment = comment_df[comment_df['代码'] == code]
-                if stock_comment.empty:
-                    continue
-                
-                row = stock_comment.iloc[0]
-                
-                # 获取关注指数和综合得分
-                attention = float(row.get('关注指数', 100) or 100)
-                score = float(row.get('综合得分', 0) or 0)
-                change_pct = float(row.get('涨跌幅', 0) or 0)
-                
-                # 筛选条件
-                # 1. 关注指数低于市场平均（热度不高）
-                if attention >= avg_attention:
-                    continue
-                
-                # 2. 今日涨幅不超过5%（未大幅拉升，还有空间）
-                if change_pct > 5:
-                    continue
-                
-                # 3. 综合得分不低于60（基本面不差）
-                if score < 60:
-                    continue
-                
-                # 符合条件，添加到潜力股列表
-                hidden_stocks.append({
+                stock_data = {
                     'code': code,
                     'name': stock_info['name'],
                     'sector': stock_info['sector'],
                     'big_buy_count': stock_info['count'],
                     'big_buy_times': stock_info['times'][:5],  # 最多保留5个时间点
                     'big_buy_info': stock_info['info_list'][:3],  # 最多保留3条信息
-                    'attention': attention,
-                    'attention_vs_avg': attention - avg_attention,  # 与平均值的差距
-                    'score': score,
-                    'change_pct': change_pct,
-                    'rank': int(row.get('目前排名', 0) or 0),
-                    'org_participate': float(row.get('机构参与度', 0) or 0),
-                })
+                    # 以下字段从千股千评获取，默认值供 LLM 判断
+                    'attention': 0.0,
+                    'avg_attention': avg_attention,  # 市场平均值，供 LLM 对比
+                    'score': 0.0,
+                    'change_pct': 0.0,
+                    'rank': 0,
+                    'org_participate': 0.0,
+                }
+                
+                # 查找千股千评数据
+                if comment_df is not None and not comment_df.empty:
+                    stock_comment = comment_df[comment_df['代码'] == code]
+                    if not stock_comment.empty:
+                        row = stock_comment.iloc[0]
+                        stock_data['attention'] = float(row.get('关注指数', 0) or 0)
+                        stock_data['score'] = float(row.get('综合得分', 0) or 0)
+                        stock_data['change_pct'] = float(row.get('涨跌幅', 0) or 0)
+                        stock_data['rank'] = int(row.get('目前排名', 0) or 0)
+                        stock_data['org_participate'] = float(row.get('机构参与度', 0) or 0)
+                
+                all_stocks.append(stock_data)
             
-            # 4. 按大笔买入次数和综合得分排序
-            hidden_stocks.sort(key=lambda x: (x['big_buy_count'], x['score']), reverse=True)
-            
-            logger.info(f"[大盘] 发现 {len(hidden_stocks)} 只资金流入但热度不高的股票")
+            # 4. 按大笔买入次数排序（次数多的排前面，供 LLM 优先分析）
+            all_stocks.sort(key=lambda x: x['big_buy_count'], reverse=True)
             
             # 5. 获取补充信息（行业、市值等）
-            if hidden_stocks:
+            if all_stocks:
                 try:
-                    # 获取A股实时行情补充市值等信息
                     spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
                     if spot_df is not None and not spot_df.empty:
-                        for stock in hidden_stocks:
+                        for stock in all_stocks:
                             stock_spot = spot_df[spot_df['代码'] == stock['code']]
                             if not stock_spot.empty:
                                 row = stock_spot.iloc[0]
                                 stock['market_cap'] = float(row.get('总市值', 0) or 0) / 1e8  # 亿元
                                 stock['turnover_rate'] = float(row.get('换手率', 0) or 0)
                                 stock['amount'] = float(row.get('成交额', 0) or 0) / 1e8  # 亿元
+                                stock['industry'] = str(row.get('所属行业', ''))
                 except Exception as e:
                     logger.debug(f"[大盘] 获取补充信息失败: {e}")
             
-            return hidden_stocks[:15]  # 最多返回15只
+            logger.info(f"[大盘] 获取到 {len(all_stocks)} 只有资金流入的股票数据")
+            
+            return all_stocks[:30]  # 返回前30只供 LLM 分析
             
         except Exception as e:
-            logger.warning(f"[大盘] 挖掘潜力股失败: {e}")
+            logger.warning(f"[大盘] 获取资金流入股票数据失败: {e}")
             return []
 
-    def _analyze_hidden_inflow_with_llm(self, overview: MarketOverview) -> str:
+    def _get_sector_opportunity_data(self, overview: MarketOverview):
         """
-        使用大模型分析资金流入但热度不高的股票
+        获取板块埋伏机会数据
         
-        综合分析：
-        1. 板块异动数据：哪些板块有主力资金流入
-        2. 盘口异动数据：大笔买入的股票特征
-        3. 千股千评数据：关注指数、综合得分
-        4. 潜力股列表：交叉筛选的结果
+        使用 SectorOpportunityAnalyzer 获取申万行业估值、筹码等数据，
+        将结果存入 overview 供 llm_mapreduce 的 SectorOpportunityAnalyst 使用。
         
-        Returns:
-            AI分析结论
+        数据包括：
+        - sector_opportunities: 所有板块机会列表（按总分排序）
+        - sector_cheap_list: 估值最低板块TOP5
+        - sector_catalyst_list: 有催化板块TOP5
+        - sector_reversal_list: 有反转信号板块TOP5
+        - sector_recommended: 推荐埋伏板块（总分>=4）
         """
-        if not self.analyzer or not self.analyzer.is_available():
-            logger.warning("[大盘] AI分析器不可用，跳过潜力股深度分析")
-            return ""
-        
-        if not overview.hidden_inflow_stocks:
-            return ""
-        
         try:
-            logger.info("[大盘] 调用大模型分析潜力股...")
+            logger.info("[大盘] 获取板块埋伏机会数据...")
             
-            # 构建潜力股数据表格
-            stocks_table = "| 代码 | 名称 | 大笔买入次数 | 关注指数 | 综合得分 | 今日涨跌 | 机构参与度 | 所属板块 |\n"
-            stocks_table += "|------|------|--------------|----------|----------|----------|------------|----------|\n"
+            # 创建板块机会分析器（不传入 analyzer，只获取数据不做 AI 分析）
+            opportunity_analyzer = SectorOpportunityAnalyzer(
+                search_service=self.search_service,
+                analyzer=None  # 不需要 AI 分析，数据会传给 llm_mapreduce
+            )
             
-            for stock in overview.hidden_inflow_stocks[:10]:
-                stocks_table += (f"| {stock['code']} | {stock['name']} | "
-                               f"{stock['big_buy_count']}次 | {stock['attention']:.0f} | "
-                               f"{stock['score']:.0f} | {stock['change_pct']:+.2f}% | "
-                               f"{stock.get('org_participate', 0):.1f}% | {stock['sector']} |\n")
+            # 获取板块机会数据（快速模式，不分析筹码以节省时间）
+            opportunities = opportunity_analyzer.find_opportunity_sectors(
+                fast_mode=True,
+                use_smart_search=False,  # 不使用智能搜索
+                analyze_chips=False  # 不分析筹码（太慢）
+            )
             
-            # 构建板块异动数据
-            board_change_text = ""
-            if overview.board_changes:
-                board_change_text = "| 板块 | 涨跌幅 | 主力净流入 | 异动次数 | 最活跃个股 |\n"
-                board_change_text += "|------|--------|------------|----------|------------|\n"
-                for bc in overview.board_changes[:8]:
-                    board_change_text += (f"| {bc['name']} | {bc['change_pct']:+.2f}% | "
-                                        f"{bc['main_net_inflow']:.2f}亿 | {bc['change_count']}次 | "
-                                        f"{bc['top_stock_name']} |\n")
+            if not opportunities:
+                logger.warning("[大盘] 未获取到板块机会数据")
+                return
             
-            # 构建大笔买入详情
-            big_buy_detail = ""
-            if '大笔买入' in overview.pankou_changes:
-                big_buy_detail = "| 时间 | 代码 | 名称 | 板块 | 详情 |\n"
-                big_buy_detail += "|------|------|------|------|------|\n"
-                for item in overview.pankou_changes['大笔买入'][:15]:
-                    big_buy_detail += (f"| {item['time']} | {item['code']} | "
-                                      f"{item['name']} | {item['sector']} | {item['info'][:30]} |\n")
+            logger.info(f"[大盘] 获取到 {len(opportunities)} 个板块机会数据")
             
-            prompt = f"""你是一位专业的A股短线交易分析师，擅长发现主力资金动向和潜力股。
-
-# 任务
-分析以下数据，找出资金正在悄悄流入但市场关注度不高的股票，这类股票往往是主力建仓阶段，后续可能有较大涨幅。
-
-# 数据
-
-## 一、潜力股候选（资金流入 + 低热度）
-
-以下股票满足条件：
-- 今日多次出现大笔买入（资金持续流入）
-- 关注指数低于市场平均（热度不高）
-- 今日涨幅不大（未大幅拉升）
-- 综合得分>=60（基本面不差）
-
-{stocks_table}
-
-## 二、板块异动详情（主力资金动向）
-
-{board_change_text if board_change_text else "暂无板块异动数据"}
-
-## 三、大笔买入明细
-
-{big_buy_detail if big_buy_detail else "暂无大笔买入数据"}
-
-## 四、市场背景
-
-- 今日涨停: {overview.limit_up_count}只
-- 今日跌停: {overview.limit_down_count}只
-- 大笔买入总次数: {overview.big_buy_count}次
-- 大笔卖出总次数: {overview.big_sell_count}次
-- 买卖力量比: {overview.big_buy_count / overview.big_sell_count if overview.big_sell_count > 0 else 0:.2f}
-
----
-
-# 分析要求
-
-请从以下角度分析：
-
-1. **资金动向判断**：
-   - 哪些板块有主力资金持续流入？
-   - 大笔买入集中在哪些行业/概念？
-   - 是否有板块异动与大笔买入形成共振？
-
-2. **潜力股筛选**：
-   - 从候选股票中，哪些最值得关注？
-   - 为什么这些股票热度低但资金在流入？
-   - 可能的上涨逻辑是什么？
-
-3. **风险提示**：
-   - 哪些股票虽然有资金流入但风险较大？
-   - 需要注意的陷阱有哪些？
-
-4. **操作建议**：
-   - 短期（1-3天）可以关注哪些？
-   - 建议的介入时机和仓位
-
----
-
-# 输出格式
-
-请直接输出 Markdown 格式的分析报告，简洁明了，重点突出。
-
-## 🔍 潜力股深度分析
-
-### 一、资金动向总结
-（简要分析主力资金流向）
-
-### 二、重点关注股票（2-3只）
-（每只股票说明：为什么值得关注、潜在逻辑、风险点）
-
-### 三、板块机会
-（哪些板块值得埋伏）
-
-### 四、风险提示
-（需要回避的情况）
-
-"""
+            # 转换为字典格式存入 overview
+            for opp in opportunities:
+                opp_dict = {
+                    'sector_name': opp.sector_name,
+                    'sector_code': opp.sector_code,
+                    # 估值数据
+                    'current_pe': opp.current_pe,
+                    'current_pb': opp.current_pb,
+                    'pe_percentile': opp.pe_percentile,
+                    'pb_percentile': opp.pb_percentile,
+                    'price_percentile': opp.price_percentile,
+                    'dividend_yield': opp.dividend_yield,
+                    # 评分
+                    'cheap_score': opp.cheap_score,
+                    'catalyst_score': opp.catalyst_score,
+                    'reversal_score': opp.reversal_score,
+                    'total_score': opp.total_score,
+                    # 原因
+                    'cheap_reasons': opp.cheap_reasons,
+                    'catalyst_reasons': opp.catalyst_reasons,
+                    'reversal_reasons': opp.reversal_reasons,
+                    # 反转信号数据
+                    'recent_5d_change': opp.recent_5d_change,
+                    'zt_count': opp.zt_count,
+                    'volume_ratio': opp.volume_ratio,
+                    # 催化剂
+                    'policy_keywords': opp.policy_keywords,
+                    'recent_news': opp.recent_news,
+                    # 推荐
+                    'recommendation': opp.recommendation,
+                    'risk_warning': opp.risk_warning,
+                }
+                overview.sector_opportunities.append(opp_dict)
             
-            generation_config = {
-                'temperature': 0.6,
-                'max_output_tokens': 1500,
-            }
+            # 按不同维度分类
+            # 估值最低TOP5（过滤掉无数据的，-1表示无数据）
+            valid_opps = [o for o in overview.sector_opportunities if o.get('price_percentile', -1) >= 0]
+            overview.sector_cheap_list = sorted(
+                valid_opps,
+                key=lambda x: x['price_percentile']
+            )[:5]
             
-            analysis = self.analyzer._call_openai_api(prompt, generation_config)
+            # 有催化TOP5
+            overview.sector_catalyst_list = sorted(
+                overview.sector_opportunities,
+                key=lambda x: x['catalyst_score'],
+                reverse=True
+            )[:5]
             
-            if analysis:
-                logger.info(f"[大盘] 潜力股分析完成，长度: {len(analysis)} 字符")
-                return analysis
-            else:
-                return ""
-                
+            # 有反转信号TOP5
+            overview.sector_reversal_list = sorted(
+                overview.sector_opportunities,
+                key=lambda x: x['reversal_score'],
+                reverse=True
+            )[:5]
+            
+            # 推荐埋伏（总分>=4）
+            overview.sector_recommended = [
+                opp for opp in overview.sector_opportunities
+                if opp['total_score'] >= 4
+            ]
+            
+            logger.info(f"[大盘] 板块机会: 推荐{len(overview.sector_recommended)}个, "
+                       f"估值低{len(overview.sector_cheap_list)}个, "
+                       f"有催化{len(overview.sector_catalyst_list)}个, "
+                       f"有反转{len(overview.sector_reversal_list)}个")
+            
         except Exception as e:
-            logger.warning(f"[大盘] 潜力股LLM分析失败: {e}")
-            return ""
-
+            logger.warning(f"[大盘] 获取板块埋伏机会数据失败: {e}")
     
     def search_market_news(self, use_smart_search: bool = True) -> List[Dict]:
         """
@@ -1528,6 +1685,47 @@ class MarketAnalyzer:
             logger.error(f"[大盘] 搜索市场新闻失败: {e}")
         
         return all_news
+    
+    def run_daily_review(self, target_date: Optional[str] = None) -> Optional[str]:
+        """
+        执行大盘复盘分析（完整流程）
+        
+        流程：
+        1. 获取市场概览数据
+        2. 搜索市场新闻
+        3. 调用 LLM Map-Reduce 分析框架生成报告
+        
+        Args:
+            target_date: 目标日期，格式 'YYYY-MM-DD'，默认为今天
+            
+        Returns:
+            复盘报告文本（Markdown 格式），失败返回 None
+        """
+        from llm_mapreduce import generate_market_review
+        
+        date_display = target_date or datetime.now().strftime('%Y-%m-%d')
+        logger.info(f"[大盘] ========== 开始大盘复盘 ({date_display}) ==========")
+        
+        try:
+            # 1. 获取市场概览数据
+            logger.info("[大盘] 步骤1: 获取市场概览数据...")
+            overview = self.get_market_overview(target_date)
+            
+            # 2. 搜索市场新闻
+            logger.info("[大盘] 步骤2: 搜索市场新闻...")
+            news = self.search_market_news()
+            
+            # 3. 调用 LLM Map-Reduce 分析框架生成报告
+            logger.info("[大盘] 步骤3: 调用 LLM 分析框架生成报告...")
+            report = generate_market_review(overview, news, self.analyzer)
+            
+            logger.info(f"[大盘] ========== 大盘复盘完成 ==========")
+            
+            return report
+            
+        except Exception as e:
+            logger.error(f"[大盘] 大盘复盘失败: {e}")
+            return None
     
     def _generate_market_search_queries(self) -> Optional[List[str]]:
         """
@@ -1599,485 +1797,6 @@ A股 政策 利好 最新消息
         except Exception as e:
             logger.warning(f"[大盘] LLM 生成搜索词异常: {e}")
             return None
-    
-    def generate_market_review(self, overview: MarketOverview, news: List) -> str:
-        """
-        使用大模型生成大盘复盘报告
-        
-        Args:
-            overview: 市场概览数据
-            news: 市场新闻列表 (SearchResult 对象列表)
-            
-        Returns:
-            大盘复盘报告文本
-        """
-        if not self.analyzer or not self.analyzer.is_available():
-            logger.warning("[大盘] AI分析器未配置或不可用，使用模板生成报告")
-            return self._generate_template_review(overview, news)
-        
-        # 构建 Prompt
-        prompt = self._build_review_prompt(overview, news)
-        
-        try:
-            logger.info("[大盘] 调用大模型生成复盘报告...")
-            
-            generation_config = {
-                'temperature': 0.7,
-            }
-            
-            # 使用 OpenAI 兼容 API
-            review = self.analyzer._call_openai_api(prompt, generation_config)
-            
-            if review:
-                logger.info(f"[大盘] 复盘报告生成成功，长度: {len(review)} 字符")
-                return review
-            else:
-                logger.warning("[大盘] 大模型返回为空")
-                return self._generate_template_review(overview, news)
-                
-        except Exception as e:
-            logger.error(f"[大盘] 大模型生成复盘报告失败: {e}")
-            return self._generate_template_review(overview, news)
-    
-    def _build_review_prompt(self, overview: MarketOverview, news: List) -> str:
-        """构建复盘报告 Prompt（增强版，包含多维度数据）"""
-        # 指数行情信息
-        indices_text = ""
-        for idx in overview.indices:
-            direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
-            indices_text += f"- {idx.name}: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
-        
-        # 行业板块信息
-        top_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.top_sectors[:5]])
-        bottom_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.bottom_sectors[:5]])
-        
-        # 概念板块信息
-        top_concepts_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.top_concepts[:5]]) if overview.top_concepts else "暂无数据"
-        bottom_concepts_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.bottom_concepts[:5]]) if overview.bottom_concepts else "暂无数据"
-        
-        # 龙虎榜股票
-        lhb_text = ""
-        for stock in overview.lhb_stocks[:5]:
-            lhb_text += f"- {stock['name']}({stock['code']}): {stock['change_pct']:+.2f}%, 净买入{stock['net_buy']:.2f}亿, {stock['reason']}\n"
-        
-        # 板块异动详情
-        board_change_text = ""
-        if overview.board_changes:
-            for bc in overview.board_changes[:5]:
-                direction = "买入" if bc.get('top_stock_direction') == '大笔买入' else "卖出"
-                board_change_text += f"- {bc['name']}: 涨跌{bc['change_pct']:+.2f}%, 主力净流入{bc['main_net_inflow']:.2f}亿, 异动{bc['change_count']}次, 最活跃:{bc['top_stock_name']}({direction})\n"
-        
-        # 盘口异动统计
-        pankou_text = f"""| 异动类型 | 次数 |
-|----------|------|
-| 大笔买入 | {overview.big_buy_count} |
-| 大笔卖出 | {overview.big_sell_count} |
-| 封涨停板 | {overview.limit_up_seal_count} |
-| 封跌停板 | {overview.limit_down_seal_count} |
-| 火箭发射 | {overview.rocket_launch_count} |
-| 高台跳水 | {overview.high_dive_count} |"""
-        
-        # 盘口异动详情（大笔买入前5）
-        pankou_detail_text = ""
-        if '大笔买入' in overview.pankou_changes:
-            pankou_detail_text += "\n**大笔买入TOP5:**\n"
-            for item in overview.pankou_changes['大笔买入'][:5]:
-                pankou_detail_text += f"- {item['time']} {item['name']}({item['code']}) {item['info']}\n"
-        if '火箭发射' in overview.pankou_changes:
-            pankou_detail_text += "\n**火箭发射TOP5:**\n"
-            for item in overview.pankou_changes['火箭发射'][:5]:
-                pankou_detail_text += f"- {item['time']} {item['name']}({item['code']}) {item['info']}\n"
-        
-        # 财新内容精选
-        caixin_text = ""
-        if overview.caixin_news:
-            for i, news_item in enumerate(overview.caixin_news[:8], 1):
-                tag = news_item.get('tag', '')
-                summary = news_item.get('summary', '')[:80]
-                caixin_text += f"{i}. [{tag}] {summary}\n"
-        
-        # 新闻信息
-        news_text = ""
-        for i, n in enumerate(news[:6], 1):
-            if hasattr(n, 'title'):
-                title = n.title[:50] if n.title else ''
-                snippet = n.snippet[:100] if n.snippet else ''
-            else:
-                title = n.get('title', '')[:50]
-                snippet = n.get('snippet', '')[:100]
-            news_text += f"{i}. {title}\n   {snippet}\n"
-        
-        # 计算涨跌比
-        total_stocks = overview.up_count + overview.down_count + overview.flat_count
-        up_ratio = overview.up_count / total_stocks * 100 if total_stocks > 0 else 0
-        
-        # 计算买卖力量对比
-        buy_sell_ratio = overview.big_buy_count / overview.big_sell_count if overview.big_sell_count > 0 else 0
-        
-        # 涨停板行情数据
-        zt_pool_text = ""
-        if overview.zt_pool:
-            for zt in overview.zt_pool[:8]:
-                zt_pool_text += f"- {zt['name']}({zt['code']}): {zt['continuous']}板, 封板资金{zt['seal_amount']:.2f}亿, {zt['industry']}\n"
-        
-        # 昨日涨停今日表现
-        previous_zt_text = ""
-        if overview.previous_zt_pool:
-            for pzt in overview.previous_zt_pool[:5]:
-                previous_zt_text += f"- {pzt['name']}: 今日{pzt['change_pct']:+.2f}%, 昨日{pzt['yesterday_continuous']}板\n"
-        
-        # 炸板股
-        zb_text = ""
-        if overview.zb_pool:
-            for zb in overview.zb_pool[:5]:
-                zb_text += f"- {zb['name']}: 炸板{zb['zb_count']}次, 涨跌{zb['change_pct']:+.2f}%\n"
-        
-        # 跌停股
-        dt_text = ""
-        if overview.dt_pool:
-            for dt in overview.dt_pool[:5]:
-                dt_text += f"- {dt['name']}: 连续{dt['continuous']}跌停, {dt['industry']}\n"
-        
-        # 千股千评TOP股票
-        comment_top_text = ""
-        if overview.comment_top_stocks:
-            for ct in overview.comment_top_stocks[:5]:
-                comment_top_text += f"- {ct['name']}({ct['code']}): 得分{ct['score']:.0f}, 排名{ct['rank']}, 机构参与度{ct['org_participate']:.1f}%\n"
-        
-        # 高关注度股票
-        attention_text = ""
-        if overview.comment_high_attention:
-            for att in overview.comment_high_attention[:5]:
-                attention_text += f"- {att['name']}: 关注指数{att['attention']:.0f}, 得分{att['score']:.0f}\n"
-        
-        # 分析师推荐
-        analyst_text = ""
-        if overview.analyst_top_list:
-            for an in overview.analyst_top_list[:5]:
-                analyst_text += f"- {an['name']}({an['company']}): 年度指数{an['index']:.0f}, 收益率{an['year_yield']:.1f}%, 推荐{an['latest_stock']}\n"
-        
-        # 潜力股数据（资金流入但热度不高）
-        hidden_inflow_text = ""
-        if overview.hidden_inflow_stocks:
-            hidden_inflow_text = "| 代码 | 名称 | 大笔买入 | 关注指数 | 综合得分 | 今日涨跌 | 板块 |\n"
-            hidden_inflow_text += "|------|------|----------|----------|----------|----------|------|\n"
-            for stock in overview.hidden_inflow_stocks[:8]:
-                hidden_inflow_text += (f"| {stock['code']} | {stock['name']} | "
-                                      f"{stock['big_buy_count']}次 | {stock['attention']:.0f} | "
-                                      f"{stock['score']:.0f} | {stock['change_pct']:+.2f}% | "
-                                      f"{stock['sector']} |\n")
-        
-        # AI潜力股分析结论
-        hidden_inflow_analysis_text = overview.hidden_inflow_analysis if overview.hidden_inflow_analysis else ""
-        
-        prompt = f"""你是一位专业的A股市场分析师，请根据提供的多维度数据生成一份深度大盘复盘报告。
-
-【重要】输出要求：
-- 必须输出纯 Markdown 文本格式
-- 禁止输出 JSON 格式和代码块
-- emoji 仅在标题处少量使用
-
----
-
-# 今日市场数据（{overview.date}）
-
-## 一、主要指数
-{indices_text}
-
-## 二、市场概况
-| 指标 | 数值 |
-|------|------|
-| 上涨家数 | {overview.up_count} (涨跌比 {up_ratio:.1f}%) |
-| 下跌家数 | {overview.down_count} |
-| 涨停 | {overview.limit_up_count} |
-| 跌停 | {overview.limit_down_count} |
-| 两市成交额 | {overview.total_amount:.0f}亿 |
-| 平均换手率 | {overview.avg_turnover_rate:.2f}% |
-| 高换手(>10%)股票数 | {overview.high_turnover_count} |
-
-## 三、资金流向
-
-### 融资融券
-- 融资余额: {overview.margin_balance:.0f}亿
-- 融资买入额: {overview.margin_buy:.2f}亿
-- 融券余额: {overview.short_balance:.2f}亿
-
-### 大宗交易
-- 成交总额: {overview.block_trade_amount:.2f}亿
-- 溢价成交占比: {overview.block_trade_premium_ratio:.1f}%
-- 折价成交占比: {overview.block_trade_discount_ratio:.1f}%
-
-## 四、板块表现
-
-### 行业板块
-- 领涨: {top_sectors_text}
-- 领跌: {bottom_sectors_text}
-
-### 概念板块
-- 热门: {top_concepts_text}
-- 冷门: {bottom_concepts_text}
-
-## 五、龙虎榜（净买入: {overview.lhb_net_buy:.2f}亿）
-{lhb_text if lhb_text else "今日无龙虎榜数据"}
-
-## 六、涨停板行情（重要情绪指标）
-
-### 涨停股池（{overview.zt_pool_count}只）
-- 首板: {overview.zt_first_board_count}只
-- 连板: {overview.zt_continuous_count}只
-- 最高连板: {overview.zt_max_continuous}板
-- 涨停股总成交额: {overview.zt_total_amount:.0f}亿
-- 平均换手率: {overview.zt_avg_turnover:.1f}%
-
-**连板龙头:**
-{zt_pool_text if zt_pool_text else "暂无数据"}
-
-### 昨日涨停今日表现（溢价率: {overview.previous_zt_avg_change:+.2f}%）
-- 昨日涨停: {overview.previous_zt_count}只
-- 今日上涨: {overview.previous_zt_up_count}只
-- 今日下跌: {overview.previous_zt_down_count}只
-{previous_zt_text if previous_zt_text else ""}
-
-### 炸板股池（炸板率: {overview.zb_rate:.1f}%）
-- 炸板股: {overview.zb_pool_count}只
-- 炸板总次数: {overview.zb_total_count}次
-{zb_text if zb_text else ""}
-
-### 跌停股池（{overview.dt_pool_count}只）
-- 连续跌停: {overview.dt_continuous_count}只
-{dt_text if dt_text else ""}
-
-### 强势股池（{overview.strong_pool_count}只）
-- 60日新高: {overview.strong_new_high_count}只
-- 近期多次涨停: {overview.strong_multi_zt_count}只
-
-## 七、板块异动详情（总异动{overview.board_change_count}次）
-{board_change_text if board_change_text else "暂无板块异动数据"}
-
-## 八、盘口异动（买卖力量比: {buy_sell_ratio:.2f}）
-{pankou_text}
-{pankou_detail_text if pankou_detail_text else ""}
-
-## 九、千股千评（市场情绪参考）
-- 市场平均得分: {overview.comment_avg_score:.1f}
-- 高分股(>=80分): {overview.comment_high_score_count}只
-- 低分股(<=40分): {overview.comment_low_score_count}只
-
-**综合得分TOP5:**
-{comment_top_text if comment_top_text else "暂无数据"}
-
-**高关注度股票:**
-{attention_text if attention_text else "暂无数据"}
-
-## 十、分析师指数（机构观点参考）
-{analyst_text if analyst_text else "暂无数据"}
-
-## 十一、财新内容精选
-{caixin_text if caixin_text else "暂无财新数据"}
-
-## 十二、潜力股发现（资金流入但热度不高）
-
-以下股票满足条件：多次大笔买入 + 关注指数低于市场平均 + 今日涨幅不大 + 综合得分>=60
-
-{hidden_inflow_text if hidden_inflow_text else "暂无符合条件的潜力股"}
-
-{f"**AI深度分析:**{chr(10)}{hidden_inflow_analysis_text}" if hidden_inflow_analysis_text else ""}
-
-## 十三、市场新闻
-{news_text if news_text else "暂无相关新闻"}
-
----
-
-# 分析要点
-
-请重点关注：
-1. **涨停板行情**：连板高度、炸板率、溢价率是市场情绪的核心指标
-2. 融资余额变化：杠杆资金是加仓还是减仓？
-3. 大宗交易折溢价：折价成交多说明大股东/机构在出货
-4. 龙虎榜机构动向：机构席位买入的板块往往是中期主线
-5. 概念板块轮动：哪些概念在持续发酵？哪些在退潮？
-6. 涨跌比与成交额：赚钱效应如何？量能是否配合？
-7. **板块异动**：哪些板块异动频繁？主力资金在哪些板块活跃？
-8. **盘口异动**：大笔买入vs大笔卖出的力量对比
-9. **千股千评**：市场整体评分变化，高分股和低分股的分布
-10. **财新内容**：关注政策面、宏观经济的重要信息
-11. **潜力股发现**：资金流入但热度不高的股票，可能是主力建仓阶段
-
----
-
-# 输出格式
-
-## 📊 {overview.date} 大盘复盘
-
-### 一、市场总结
-（概括今日市场表现、赚钱效应、成交量变化）
-
-### 二、指数点评
-（分析各指数走势特点，大小盘风格切换）
-
-### 三、涨停板情绪分析
-（分析连板高度、炸板率、溢价率，判断市场情绪）
-
-### 四、资金动向解读
-（综合分析融资融券、大宗交易的信号含义）
-
-### 五、热点解读
-（分析板块和概念背后的逻辑，判断持续性）
-
-### 六、龙虎榜点评
-（分析主力资金动向，机构偏好的方向）
-
-### 七、盘口异动分析
-（分析板块异动和盘口异动数据，判断主力动向）
-
-### 八、千股千评解读
-（分析市场整体评分，关注高分股和高关注度股票）
-
-### 九、财新要闻解读
-（解读财新内容中的重要政策和宏观信息）
-
-### 十、潜力股点评
-（分析资金流入但热度不高的股票，判断是否值得关注）
-
-### 十一、后市展望
-（给出明日市场预判和操作建议）
-
-### 十二、风险提示
-（需要关注的风险点）
-
----
-
-请直接输出复盘报告内容。
-"""
-        return prompt
-
-    def _generate_template_review(self, overview: MarketOverview, news: List) -> str:
-        """使用模板生成复盘报告（无大模型时的备选方案）"""
-        
-        # 判断市场走势
-        sh_index = next((idx for idx in overview.indices if idx.code == '000001'), None)
-        if sh_index:
-            if sh_index.change_pct > 1:
-                market_mood = "强势上涨"
-            elif sh_index.change_pct > 0:
-                market_mood = "小幅上涨"
-            elif sh_index.change_pct > -1:
-                market_mood = "小幅下跌"
-            else:
-                market_mood = "明显下跌"
-        else:
-            market_mood = "震荡整理"
-        
-        # 指数行情（简洁格式）
-        indices_text = ""
-        for idx in overview.indices[:4]:
-            direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
-            indices_text += f"- **{idx.name}**: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
-        
-        # 板块信息
-        top_text = "、".join([s['name'] for s in overview.top_sectors[:3]])
-        bottom_text = "、".join([s['name'] for s in overview.bottom_sectors[:3]])
-        
-        # 板块异动信息
-        board_change_text = ""
-        if overview.board_changes:
-            board_change_text = "\n### 六、板块异动\n"
-            for bc in overview.board_changes[:5]:
-                board_change_text += f"- **{bc['name']}**: 涨跌{bc['change_pct']:+.2f}%, 异动{bc['change_count']}次\n"
-        
-        # 盘口异动信息
-        pankou_text = ""
-        if overview.big_buy_count > 0 or overview.big_sell_count > 0:
-            pankou_text = f"""
-### 七、盘口异动
-| 类型 | 次数 |
-|------|------|
-| 大笔买入 | {overview.big_buy_count} |
-| 大笔卖出 | {overview.big_sell_count} |
-| 封涨停板 | {overview.limit_up_seal_count} |
-| 封跌停板 | {overview.limit_down_seal_count} |
-| 火箭发射 | {overview.rocket_launch_count} |
-| 高台跳水 | {overview.high_dive_count} |
-"""
-        
-        # 财新内容
-        caixin_text = ""
-        if overview.caixin_news:
-            caixin_text = "\n### 八、财新要闻\n"
-            for i, news_item in enumerate(overview.caixin_news[:5], 1):
-                tag = news_item.get('tag', '')
-                summary = news_item.get('summary', '')[:60]
-                caixin_text += f"{i}. [{tag}] {summary}\n"
-        
-        report = f"""## 📊 {overview.date} 大盘复盘
-
-### 一、市场总结
-今日A股市场整体呈现**{market_mood}**态势。
-
-### 二、主要指数
-{indices_text}
-
-### 三、涨跌统计
-| 指标 | 数值 |
-|------|------|
-| 上涨家数 | {overview.up_count} |
-| 下跌家数 | {overview.down_count} |
-| 涨停 | {overview.limit_up_count} |
-| 跌停 | {overview.limit_down_count} |
-| 两市成交额 | {overview.total_amount:.0f}亿 |
-
-### 四、板块表现
-- **领涨**: {top_text}
-- **领跌**: {bottom_text}
-
-### 五、龙虎榜
-- 净买入: {overview.lhb_net_buy:.2f}亿
-- 上榜股票: {len(overview.lhb_stocks)}只
-{board_change_text}{pankou_text}{caixin_text}
-### 九、风险提示
-市场有风险，投资需谨慎。以上数据仅供参考，不构成投资建议。
-
----
-*复盘时间: {datetime.now().strftime('%H:%M')}*
-"""
-        return report
-    
-    def run_daily_review(self, target_date: Optional[str] = None, include_opportunity: bool = True) -> str:
-        """
-        执行每日大盘复盘流程
-        
-        Args:
-            target_date: 目标日期，格式 'YYYY-MM-DD'，默认为今天
-            include_opportunity: 是否包含板块机会分析
-        
-        Returns:
-            复盘报告文本
-        """
-        date_display = target_date or datetime.now().strftime('%Y-%m-%d')
-        logger.info(f"========== 开始大盘复盘分析 ({date_display}) ==========")
-        
-        # 1. 获取市场概览
-        overview = self.get_market_overview(target_date)
-        
-        # 2. 搜索市场新闻（历史日期时可能搜索不到相关新闻）
-        news = self.search_market_news()
-        
-        # 3. 生成复盘报告
-        report = self.generate_market_review(overview, news)
-        
-        # 4. 添加板块机会分析
-        if include_opportunity:
-            try:
-                opportunity_analyzer = SectorOpportunityAnalyzer(self.search_service, self.analyzer)
-                opportunities = opportunity_analyzer.find_opportunity_sectors(fast_mode=True)
-                opportunity_report = opportunity_analyzer.generate_opportunity_report(opportunities)
-                report += "\n\n" + opportunity_report
-            except Exception as e:
-                logger.warning(f"[大盘] 板块机会分析失败: {e}")
-        
-        logger.info("========== 大盘复盘分析完成 ==========")
-        
-        return report
 
 
 # ============================================================
@@ -2100,9 +1819,9 @@ class SectorOpportunity:
     # ========== 够便宜（安全垫）==========
     current_pe: float = 0.0             # 当前PE
     current_pb: float = 0.0             # 当前PB
-    pe_percentile: float = 100.0        # PE历史分位数 (0-100, 越低越便宜)
-    pb_percentile: float = 100.0        # PB历史分位数
-    price_percentile: float = 100.0     # 价格历史分位数（基于3年数据）
+    pe_percentile: float = -1.0         # PE历史分位数 (0-100, 越低越便宜, -1表示无数据)
+    pb_percentile: float = -1.0         # PB历史分位数 (-1表示无数据)
+    price_percentile: float = -1.0      # 价格历史分位数（基于3年数据, -1表示无数据）
     dividend_yield: float = 0.0         # 股息率
     cheap_score: int = 0                # 便宜得分 (0-4，增加筹码维度)
     cheap_reasons: List[str] = field(default_factory=list)  # 便宜原因
@@ -2155,16 +1874,21 @@ class SectorOpportunity:
 
 class SectorOpportunityAnalyzer:
     """
-    板块埋伏机会分析器
+    板块埋伏机会分析器（数据获取）
     
     核心逻辑：
     1. 够便宜：PE/PB历史分位数 < 30%，或价格处于3年低位
     2. 有催化：相关概念近期活跃，或有政策/技术催化预期
     3. 有反转：近期有资金流入迹象，涨停股增多，龙虎榜净买入
     
-    支持 LLM 深度分析：
-    - 传入 analyzer 参数后，可调用 generate_ai_opportunity_report() 生成 AI 深度分析报告
-    - AI 会综合分析所有数据，给出更专业的埋伏建议
+    数据来源：
+    - 申万一级行业估值数据（sw_index_first_info）
+    - 同花顺行业板块实时数据（stock_board_industry_summary_ths）
+    - 同花顺行业指数历史数据（stock_board_industry_index_ths）
+    
+    注意：
+    - 本类只负责数据获取和基础分析
+    - LLM 深度分析已移至 llm_mapreduce.py 的 SectorOpportunityAnalyst
     """
     
     # 申万一级行业代码映射（用于历史数据查询）
@@ -2200,6 +1924,40 @@ class SectorOpportunityAnalyzer:
         '801960.SI': '石油石化',
         '801970.SI': '环保',
         '801980.SI': '美容护理',
+    }
+    
+    # 同花顺行业名称映射（申万名称 -> 同花顺名称）
+    THS_INDUSTRY_MAPPING = {
+        '农林牧渔': '农林牧渔',
+        '基础化工': '化工',
+        '钢铁': '钢铁',
+        '有色金属': '有色',
+        '电子': '电子元件',
+        '家用电器': '家用电器',
+        '食品饮料': '食品饮料',
+        '纺织服饰': '纺织服装',
+        '轻工制造': '轻工制造',
+        '医药生物': '医药',
+        '公用事业': '公用事业',
+        '交通运输': '交通运输',
+        '房地产': '房地产',
+        '商贸零售': '商业百货',
+        '社会服务': '酒店及餐饮',
+        '建筑材料': '建筑材料',
+        '建筑装饰': '建筑',
+        '电力设备': '电气设备',
+        '国防军工': '国防军工',
+        '计算机': '计算机应用',
+        '传媒': '传媒',
+        '通信': '通信服务',
+        '银行': '银行',
+        '非银金融': '保险',
+        '汽车': '汽车',
+        '机械设备': '机械',
+        '煤炭': '煤炭',
+        '石油石化': '石油',
+        '环保': '环保',
+        '美容护理': '日用化工',
     }
     
     # 政策催化关键词（用于新闻匹配）
@@ -2240,7 +1998,7 @@ class SectorOpportunityAnalyzer:
         self.analyzer = analyzer
         self._sw_info_cache: Optional[pd.DataFrame] = None
         self._industry_hist_cache: Dict[str, pd.DataFrame] = {}
-        self._em_industry_mapping: Optional[Dict[str, str]] = None  # 东财行业板块名称->代码映射缓存
+        self._ths_industry_cache: Optional[pd.DataFrame] = None  # 同花顺行业板块缓存
         
     def _call_akshare_with_retry(self, fn, name: str, attempts: int = 2):
         """带重试的akshare调用"""
@@ -2256,233 +2014,187 @@ class SectorOpportunityAnalyzer:
         logger.error(f"[板块机会] {name} 最终失败: {last_error}")
         return None
     
-    def _get_em_industry_mapping(self) -> Dict[str, str]:
+    def _get_ths_industry_summary(self) -> Optional[pd.DataFrame]:
         """
-        获取东财行业板块名称到代码的映射
+        获取同花顺行业板块一览表
+        
+        数据来源：同花顺-同花顺行业一览表
+        https://q.10jqka.com.cn/thshy/
+        
+        API: stock_board_industry_summary_ths
+        
+        输出字段：
+        - 板块、涨跌幅、总成交量(万手)、总成交额(亿元)、净流入(亿元)
+        - 上涨家数、下跌家数、均价、领涨股、领涨股-最新价、领涨股-涨跌幅
         
         Returns:
-            {板块名称: 板块代码} 字典，如 {'小金属': 'BK1027', '银行': 'BK0475'}
+            同花顺行业板块 DataFrame
         """
-        if not hasattr(self, '_em_industry_mapping') or self._em_industry_mapping is None:
-            try:
-                df = self._call_akshare_with_retry(ak.stock_board_industry_name_em, "东财行业板块列表")
-                if df is not None and not df.empty:
-                    # 构建名称到代码的映射
-                    self._em_industry_mapping = {}
-                    for _, row in df.iterrows():
-                        name = str(row.get('板块名称', ''))
-                        code = str(row.get('板块代码', ''))
-                        if name and code:
-                            self._em_industry_mapping[name] = code
-                    logger.info(f"[板块机会] 缓存东财行业板块映射: {len(self._em_industry_mapping)} 个")
-                else:
-                    self._em_industry_mapping = {}
-            except Exception as e:
-                logger.warning(f"[板块机会] 获取东财行业板块映射失败: {e}")
-                self._em_industry_mapping = {}
+        if self._ths_industry_cache is not None:
+            return self._ths_industry_cache
         
-        return self._em_industry_mapping
+        try:
+            logger.info("[板块机会] 获取同花顺行业板块数据...")
+            df = self._call_akshare_with_retry(ak.stock_board_industry_summary_ths, "同花顺行业板块")
+            if df is not None and not df.empty:
+                self._ths_industry_cache = df
+                logger.info(f"[板块机会] 获取到 {len(df)} 个同花顺行业板块")
+            return df
+        except Exception as e:
+            logger.error(f"[板块机会] 获取同花顺行业板块失败: {e}")
+            return None
     
-    def _find_em_sector(self, sector_name: str) -> Optional[str]:
+    def _get_ths_industry_index_hist(self, symbol: str, days: int = 750) -> Optional[pd.DataFrame]:
         """
-        根据申万行业名称查找对应的东财板块名称或代码
+        获取同花顺行业指数历史数据
+        
+        数据来源：同花顺-板块-行业板块-指数日频率数据
+        https://q.10jqka.com.cn/thshy/detail/code/881270/
+        
+        API: stock_board_industry_index_ths
+        
+        Args:
+            symbol: 同花顺行业名称（如"元件"、"银行"）
+            days: 获取天数（约3年）
+            
+        Returns:
+            历史数据 DataFrame，包含：日期、开盘价、最高价、最低价、收盘价、成交量、成交额
+        """
+        cache_key = f"ths_{symbol}"
+        if cache_key in self._industry_hist_cache:
+            return self._industry_hist_cache[cache_key]
+        
+        try:
+            # 计算日期范围
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y%m%d')
+            
+            df = self._call_akshare_with_retry(
+                lambda: ak.stock_board_industry_index_ths(symbol=symbol, start_date=start_date, end_date=end_date),
+                f"同花顺指数历史({symbol})"
+            )
+            if df is not None and not df.empty:
+                self._industry_hist_cache[cache_key] = df
+                logger.debug(f"[板块机会] {symbol} 获取到 {len(df)} 条历史数据")
+            return df
+        except Exception as e:
+            logger.warning(f"[板块机会] 获取 {symbol} 历史数据失败: {e}")
+            return None
+    
+    def _find_ths_sector(self, sector_name: str) -> Optional[str]:
+        """
+        根据申万行业名称查找对应的同花顺板块名称
         
         Args:
             sector_name: 申万行业名称（如"银行"、"有色金属"）
             
         Returns:
-            东财板块名称或代码，找不到返回 None
+            同花顺板块名称，找不到返回 None
         """
-        mapping = self._get_em_industry_mapping()
-        if not mapping:
+        # 1. 使用预定义映射
+        if sector_name in self.THS_INDUSTRY_MAPPING:
+            return self.THS_INDUSTRY_MAPPING[sector_name]
+        
+        # 2. 从同花顺数据中模糊匹配
+        ths_df = self._get_ths_industry_summary()
+        if ths_df is None or ths_df.empty:
             return None
         
-        # 1. 精确匹配
-        if sector_name in mapping:
+        # 精确匹配
+        if sector_name in ths_df['板块'].values:
             return sector_name
         
-        # 2. 模糊匹配（申万名称可能与东财名称略有不同）
-        for em_name in mapping.keys():
-            # 包含关系匹配
-            if sector_name in em_name or em_name in sector_name:
-                logger.debug(f"[板块机会] 板块名称匹配: {sector_name} -> {em_name}")
-                return em_name
+        # 模糊匹配
+        for ths_name in ths_df['板块'].values:
+            if sector_name in str(ths_name) or str(ths_name) in sector_name:
+                return str(ths_name)
             # 前两个字匹配
-            if len(sector_name) >= 2 and len(em_name) >= 2 and sector_name[:2] == em_name[:2]:
-                logger.debug(f"[板块机会] 板块名称前缀匹配: {sector_name} -> {em_name}")
-                return em_name
+            if len(sector_name) >= 2 and len(str(ths_name)) >= 2 and sector_name[:2] == str(ths_name)[:2]:
+                return str(ths_name)
         
         return None
     
     def _get_sector_constituents(self, sector_name: str, top_n: int = 5) -> List[Dict[str, Any]]:
         """
-        获取板块成分股（按成交额排序取前N只）
+        获取板块领涨股信息（从同花顺数据获取）
         
-        优化策略：
-        1. 先从缓存的东财板块映射中查找正确的板块名称
-        2. 使用正确的板块名称查询成分股
-        3. 按成交额排序（成交额大的通常是龙头或热门股）
+        注意：同花顺行业一览表接口直接提供领涨股信息
         
         Args:
-            sector_name: 板块名称（申万或东财行业板块名称）
-            top_n: 获取前N只股票
+            sector_name: 板块名称
+            top_n: 获取前N只股票（同花顺只提供领涨股）
             
         Returns:
-            成分股列表，每个元素包含 code, name, amount(成交额), change_pct(涨跌幅)
+            成分股列表
         """
         try:
-            logger.debug(f"[板块机会] 获取 {sector_name} 成分股...")
-            
-            # 查找正确的东财板块名称
-            em_sector = self._find_em_sector(sector_name)
-            query_name = em_sector if em_sector else sector_name
-            
-            # 获取成分股
-            df = self._call_akshare_with_retry(
-                lambda: ak.stock_board_industry_cons_em(symbol=query_name),
-                f"{query_name}成分股"
-            )
-            
-            if df is None or df.empty:
-                logger.warning(f"[板块机会] {sector_name} 成分股数据为空")
+            ths_df = self._get_ths_industry_summary()
+            if ths_df is None or ths_df.empty:
                 return []
             
-            # 按成交额排序（成交额大的通常是龙头股或热门股）
-            # 东财返回的列名：代码, 名称, 最新价, 涨跌幅, 成交量, 成交额, 换手率, 市盈率-动态, 市净率
-            if '成交额' in df.columns:
-                df['成交额'] = pd.to_numeric(df['成交额'], errors='coerce')
-                df = df.sort_values('成交额', ascending=False)
+            # 查找对应板块
+            ths_sector = self._find_ths_sector(sector_name)
+            if not ths_sector:
+                return []
             
-            # 取前N只
-            result = []
-            for _, row in df.head(top_n).iterrows():
-                result.append({
-                    'code': str(row.get('代码', '')),
-                    'name': str(row.get('名称', '')),
-                    'amount': float(row.get('成交额', 0) or 0),
-                    'change_pct': float(row.get('涨跌幅', 0) or 0),
-                    'turnover_rate': float(row.get('换手率', 0) or 0),
-                })
+            matched = ths_df[ths_df['板块'] == ths_sector]
+            if matched.empty:
+                return []
             
-            logger.debug(f"[板块机会] {sector_name} 获取到 {len(result)} 只成分股（按成交额排序）")
-            return result
+            row = matched.iloc[0]
+            leader_stock = str(row.get('领涨股', ''))
+            leader_price = float(row.get('领涨股-最新价', 0) or 0)
+            leader_change = float(row.get('领涨股-涨跌幅', 0) or 0)
+            
+            if leader_stock:
+                return [{
+                    'code': '',  # 同花顺接口不提供代码
+                    'name': leader_stock,
+                    'price': leader_price,
+                    'change_pct': leader_change,
+                    'is_leader': True,
+                }]
+            
+            return []
             
         except Exception as e:
             logger.warning(f"[板块机会] 获取 {sector_name} 成分股失败: {e}")
             return []
     
-    def _analyze_sector_chips(self, opp: SectorOpportunity, em_sector_name: Optional[str] = None) -> None:
+    def _analyze_sector_chips(self, opp: SectorOpportunity, ths_sector_name: Optional[str] = None) -> None:
         """
-        分析板块筹码集中度
+        获取板块筹码集中度数据（简化版）
         
-        策略：
-        1. 获取板块成分股（按成交额排序，成交额最大的视为龙头/热门股）
-        2. 获取前3-5只股票的筹码分布数据
-        3. 计算板块平均筹码集中度和获利比例
-        4. 识别龙头股（成交额最大）的筹码状态
+        注意：由于同花顺接口不直接提供成分股代码，筹码分析功能简化为获取领涨股信息
         
         Args:
             opp: 板块机会对象
-            em_sector_name: 东财板块名称（用于获取成分股）
+            ths_sector_name: 同花顺板块名称
         """
         try:
-            # 使用东财板块名称获取成分股
-            sector_name = em_sector_name or opp.sector_name
-            
-            # 获取板块成分股（按成交额排序，前10只）
-            constituents = self._get_sector_constituents(sector_name, top_n=10)
-            
-            if not constituents:
-                logger.debug(f"[板块机会] {opp.sector_name} 无法获取成分股，跳过筹码分析")
+            ths_df = self._get_ths_industry_summary()
+            if ths_df is None or ths_df.empty:
                 return
             
-            # 导入 AkshareFetcher 获取筹码数据
-            from data_provider.akshare_fetcher import AkshareFetcher
-            fetcher = AkshareFetcher(sleep_min=1, sleep_max=1.5)
-            
-            chip_data_list = []
-            leader_chip = None
-            leader_name = ""
-            leader_amount = 0
-            
-            # 分析前5只股票（按成交额排序的）
-            for i, stock in enumerate(constituents[:5]):
-                code = stock['code']
-                name = stock['name']
-                amount = stock.get('amount', 0)
-                
-                try:
-                    chip = fetcher.get_chip_distribution(code)
-                    if chip:
-                        chip_data_list.append({
-                            'code': code,
-                            'name': name,
-                            'amount': amount,
-                            'concentration_90': chip.concentration_90,
-                            'profit_ratio': chip.profit_ratio,
-                            'avg_cost': chip.avg_cost,
-                        })
-                        
-                        # 成交额最大的作为龙头股
-                        if amount > leader_amount:
-                            leader_amount = amount
-                            leader_chip = chip
-                            leader_name = name
-                            
-                except Exception as e:
-                    logger.debug(f"[板块机会] 获取 {code} 筹码数据失败: {e}")
-                    continue
-                
-                time.sleep(0.3)  # 避免请求过快
-            
-            if not chip_data_list:
-                logger.debug(f"[板块机会] {opp.sector_name} 无有效筹码数据")
+            sector_name = ths_sector_name or opp.sector_name
+            ths_sector = self._find_ths_sector(sector_name)
+            if not ths_sector:
                 return
             
-            # 计算板块平均值
-            avg_concentration = sum(d['concentration_90'] for d in chip_data_list) / len(chip_data_list)
-            avg_profit = sum(d['profit_ratio'] for d in chip_data_list) / len(chip_data_list)
+            matched = ths_df[ths_df['板块'] == ths_sector]
+            if matched.empty:
+                return
             
-            # 更新板块机会对象
-            opp.avg_chip_concentration = avg_concentration
-            opp.avg_profit_ratio = avg_profit
+            row = matched.iloc[0]
+            leader_stock = str(row.get('领涨股', ''))
+            leader_change = float(row.get('领涨股-涨跌幅', 0) or 0)
             
-            if leader_chip:
-                opp.leader_chip_concentration = leader_chip.concentration_90
-                opp.leader_profit_ratio = leader_chip.profit_ratio
-                opp.leader_stock_name = leader_name
-            
-            # 生成筹码分析结论
-            analysis_parts = []
-            
-            # 筹码集中度分析
-            if avg_concentration < 0.10:
-                analysis_parts.append("筹码高度集中")
-            elif avg_concentration < 0.15:
-                analysis_parts.append("筹码较集中")
-            elif avg_concentration < 0.25:
-                analysis_parts.append("筹码分散度中等")
-            else:
-                analysis_parts.append("筹码较分散")
-            
-            # 获利比例分析
-            if avg_profit < 0.30:
-                analysis_parts.append("套牢盘较重(获利<30%)")
-            elif avg_profit < 0.50:
-                analysis_parts.append("获利盘中等(30-50%)")
-            elif avg_profit < 0.70:
-                analysis_parts.append("获利盘较多(50-70%)")
-            else:
-                analysis_parts.append("获利盘极高(>70%)")
-            
-            opp.chip_analysis = "，".join(analysis_parts)
-            
-            logger.info(f"[板块机会] {opp.sector_name} 筹码分析: 平均集中度={avg_concentration:.1%}, "
-                       f"平均获利比例={avg_profit:.1%}, 龙头={leader_name}(成交额最大)")
-            
+            if leader_stock:
+                opp.leader_stock_name = leader_stock
+                opp.chip_analysis = f"领涨股{leader_stock}涨幅{leader_change:+.1f}%"
+                
         except Exception as e:
-            logger.warning(f"[板块机会] {opp.sector_name} 筹码分析失败: {e}")
-    
+            logger.warning(f"[板块机会] {opp.sector_name} 筹码数据获取失败: {e}")
     def _get_sw_industry_info(self) -> Optional[pd.DataFrame]:
         """获取申万一级行业当前估值信息"""
         if self._sw_info_cache is not None:
@@ -2566,14 +2278,28 @@ class SectorOpportunityAnalyzer:
         
         return result
     
-    def _get_em_industry_realtime(self) -> Optional[pd.DataFrame]:
-        """获取东财行业板块实时行情"""
+    def _calculate_price_percentile_ths(self, sector_name: str) -> float:
+        """
+        使用同花顺历史数据计算价格分位数
+        
+        Args:
+            sector_name: 同花顺行业名称
+            
+        Returns:
+            分位数 (0-100)，越低表示当前价格越便宜
+        """
         try:
-            df = self._call_akshare_with_retry(ak.stock_board_industry_name_em, "东财行业板块")
-            return df
+            df = self._get_ths_industry_index_hist(sector_name)
+            if df is None or df.empty:
+                return 50.0
+            
+            current_price = float(df['收盘价'].iloc[-1])
+            all_prices = df['收盘价'].astype(float)
+            percentile = (all_prices < current_price).sum() / len(all_prices) * 100
+            return percentile
         except Exception as e:
-            logger.error(f"[板块机会] 获取东财行业板块失败: {e}")
-            return None
+            logger.warning(f"[板块机会] 计算 {sector_name} 价格分位数失败: {e}")
+            return 50.0
     
     def _get_zt_pool_by_industry(self, date: Optional[str] = None) -> Dict[str, int]:
         """
@@ -2611,231 +2337,158 @@ class SectorOpportunityAnalyzer:
         return 90.0  # 默认值
     
     def _analyze_cheap(self, opp: SectorOpportunity, sw_row: pd.Series, 
-                       price_percentiles: Optional[Dict[str, float]] = None) -> None:
+                       price_percentiles: Optional[Dict[str, float]] = None,
+                       ths_sector_name: Optional[str] = None) -> None:
         """
-        分析"够便宜"维度
+        提取"够便宜"维度的数据
         
-        评分标准：
-        - PE分位数 < 20%: +1分
-        - PB分位数 < 20%: +1分  
-        - 价格分位数 < 30%: +1分
-        - 股息率 > 3%: +1分（额外加分）
-        - 筹码集中度低 + 获利比例低: +1分（筹码维度）
+        注意：只提取数据，不做评分判断，评分由 llm_mapreduce 中的 LLM 完成
         """
-        score = 0
-        reasons = []
-        
         # 获取当前估值
         opp.current_pe = float(sw_row.get('TTM(滚动)市盈率', 0) or 0)
         opp.current_pb = float(sw_row.get('市净率', 0) or 0)
         opp.dividend_yield = float(sw_row.get('静态股息率', 0) or 0)
         
-        # 获取价格分位数
-        code = str(sw_row.get('行业代码', '')).replace('.SI', '')
-        if price_percentiles and code in price_percentiles:
-            opp.price_percentile = price_percentiles[code]
+        # 获取价格分位数（使用同花顺板块名称作为key）
+        if price_percentiles and ths_sector_name and ths_sector_name in price_percentiles:
+            opp.price_percentile = price_percentiles[ths_sector_name]
         else:
-            opp.price_percentile = 50.0  # 默认值
+            # 没有历史数据时，不设置默认值50%，而是设为-1表示无数据
+            opp.price_percentile = -1.0
         
-        # 简化的PE/PB分位数估算（基于价格分位数）
-        opp.pe_percentile = opp.price_percentile
-        opp.pb_percentile = opp.price_percentile
+        # PE/PB分位数暂不计算（需要历史估值数据）
+        opp.pe_percentile = -1.0
+        opp.pb_percentile = -1.0
         
-        # 评分
-        if opp.price_percentile < 20:
-            score += 1
-            reasons.append(f"价格处于历史{opp.price_percentile:.0f}%分位（极低）")
-        elif opp.price_percentile < 30:
-            score += 1
-            reasons.append(f"价格处于历史{opp.price_percentile:.0f}%分位（较低）")
-        
-        # PE评估（低PE行业更便宜）
+        # 收集原因供 LLM 参考
+        reasons = []
+        if opp.price_percentile >= 0 and opp.price_percentile < 30:
+            reasons.append(f"价格处于历史{opp.price_percentile:.0f}%分位")
         if opp.current_pe > 0 and opp.current_pe < 15:
-            score += 1
-            reasons.append(f"PE仅{opp.current_pe:.1f}倍（低估值）")
-        
-        # 高股息
+            reasons.append(f"PE {opp.current_pe:.1f}倍")
         if opp.dividend_yield > 3:
-            score += 1
-            reasons.append(f"股息率{opp.dividend_yield:.2f}%（高分红）")
-        
-        # 筹码维度评分（如果有筹码数据）
+            reasons.append(f"股息率{opp.dividend_yield:.2f}%")
         if opp.avg_chip_concentration > 0:
-            # 筹码集中度低（<15%）且获利比例低（<40%）表示卖压已释放
-            if opp.avg_chip_concentration < 0.15 and opp.avg_profit_ratio < 0.40:
-                score += 1
-                reasons.append(f"筹码集中({opp.avg_chip_concentration:.0%})且套牢盘重({opp.avg_profit_ratio:.0%})，卖压释放")
-            elif opp.avg_chip_concentration < 0.12:
-                score += 1
-                reasons.append(f"筹码高度集中({opp.avg_chip_concentration:.0%})，主力控盘")
-            elif opp.avg_profit_ratio < 0.30:
-                score += 1
-                reasons.append(f"获利盘极低({opp.avg_profit_ratio:.0%})，抛压枯竭")
+            reasons.append(f"筹码集中度{opp.avg_chip_concentration:.0%}，获利比例{opp.avg_profit_ratio:.0%}")
         
-        opp.cheap_score = min(score, 4)  # 最高4分（增加筹码维度）
+        opp.cheap_score = 0  # 不再规则评分，由 LLM 判断
         opp.cheap_reasons = reasons
     
     def _analyze_catalyst(self, opp: SectorOpportunity, concept_df: Optional[pd.DataFrame] = None,
                           search_result: Optional[Dict[str, Any]] = None) -> None:
         """
-        分析"有催化"维度
+        提取"有催化"维度的数据
         
-        评分标准：
-        - 相关概念近5日涨幅 > 5%: +1分
-        - 有政策关键词匹配: +1分
-        - 近期有相关新闻/政策: +1分（通过智能搜索获取）
+        注意：概念板块热度检查已移除（同花顺接口需要逐个调用，效率低）
+        改为依赖智能搜索结果和政策关键词
         
-        Args:
-            opp: 板块机会对象
-            concept_df: 概念板块数据
-            search_result: 智能搜索结果（可选）
+        注意：只提取数据，不做评分判断，评分由 llm_mapreduce 中的 LLM 完成
         """
-        score = 0
         reasons = []
         
         # 获取相关政策关键词
         keywords = self.POLICY_KEYWORDS.get(opp.sector_name, [])
         opp.policy_keywords = keywords
         
-        # 检查概念板块热度（使用传入的缓存数据）
-        if concept_df is not None and not concept_df.empty:
-            try:
-                # 查找与行业相关的概念
-                for keyword in keywords:
-                    matched = concept_df[concept_df['板块名称'].str.contains(keyword, na=False)]
-                    if not matched.empty:
-                        change = float(matched['涨跌幅'].iloc[0])
-                        if change > 3:
-                            score += 1
-                            reasons.append(f"相关概念'{keyword}'今日涨{change:.1f}%")
-                            opp.concept_heat = change
-                            break
-            except Exception as e:
-                logger.warning(f"[板块机会] 检查概念热度失败: {e}")
-        
-        # 使用智能搜索结果（如果有）
+        # 使用智能搜索结果
         if search_result and search_result.get('success'):
             catalyst_results = search_result.get('catalyst', {})
             if catalyst_results.get('results'):
-                score += 1
-                # 提取搜索到的催化剂信息
                 top_news = catalyst_results['results'][:2]
                 news_titles = [r.title[:30] for r in top_news]
-                reasons.append(f"搜索到催化剂: {'; '.join(news_titles)}")
+                reasons.append(f"相关新闻: {'; '.join(news_titles)}")
                 opp.recent_news = [r.title for r in catalyst_results['results'][:5]]
-            
-            # 如果有 LLM 摘要，添加到原因中
-            if catalyst_results.get('summary'):
-                reasons.append(f"AI分析: {catalyst_results['summary'][:100]}")
         
-        # 政策关键词本身就是催化信号
-        if keywords and score == 0:
-            score += 1
-            reasons.append(f"关注催化: {', '.join(keywords[:3])}")
+        if keywords:
+            reasons.append(f"关注催化关键词: {', '.join(keywords[:3])}")
         
-        opp.catalyst_score = min(score, 3)
+        opp.catalyst_score = 0  # 不再规则评分，由 LLM 判断
         opp.catalyst_reasons = reasons
     
-    def _analyze_reversal(self, opp: SectorOpportunity, em_row: Optional[pd.Series], 
+    def _analyze_reversal(self, opp: SectorOpportunity, ths_row: Optional[pd.Series], 
                           zt_count_map: Dict[str, int]) -> None:
         """
-        分析"有反转"维度
+        提取"有反转"维度的数据
         
-        评分标准：
-        - 今日涨幅 > 2%: +1分（资金开始关注）
-        - 行业涨停股 >= 3只: +1分（赚钱效应）
-        - 换手率 > 2%: +1分（量能配合）
+        数据来源：同花顺行业板块实时数据
         
-        注意：这里使用今日涨幅而非近5日涨幅，因为东财实时数据只有当日数据
+        注意：只提取数据，不做评分判断，评分由 llm_mapreduce 中的 LLM 完成
         """
-        score = 0
         reasons = []
         
-        # 从东财数据获取近期表现
-        if em_row is not None:
+        # 从同花顺数据获取近期表现
+        if ths_row is not None:
             try:
-                opp.recent_5d_change = float(em_row.get('涨跌幅', 0) or 0)
+                opp.recent_5d_change = float(ths_row.get('涨跌幅', 0) or 0)
+                reasons.append(f"今日涨跌{opp.recent_5d_change:+.1f}%")
                 
-                # 今日涨幅判断（作为反转信号）
-                if opp.recent_5d_change > 5:
-                    score += 1
-                    reasons.append(f"今日涨{opp.recent_5d_change:.1f}%（强势）")
-                elif opp.recent_5d_change > 2:
-                    score += 1
-                    reasons.append(f"今日涨{opp.recent_5d_change:.1f}%（走强）")
+                # 净流入
+                net_inflow = float(ths_row.get('净流入', 0) or 0)
+                if net_inflow != 0:
+                    reasons.append(f"净流入{net_inflow:.2f}亿")
+                    opp.volume_ratio = net_inflow  # 复用字段存储净流入
                 
-                # 换手率
-                turnover = float(em_row.get('换手率', 0) or 0)
-                if turnover > 2:
-                    score += 1
-                    reasons.append(f"换手率{turnover:.1f}%（活跃）")
-                    opp.volume_ratio = turnover
+                # 上涨/下跌家数
+                up_count = int(ths_row.get('上涨家数', 0) or 0)
+                down_count = int(ths_row.get('下跌家数', 0) or 0)
+                if up_count > 0 or down_count > 0:
+                    reasons.append(f"涨{up_count}/跌{down_count}")
+                
+                # 领涨股
+                leader = str(ths_row.get('领涨股', ''))
+                leader_change = float(ths_row.get('领涨股-涨跌幅', 0) or 0)
+                if leader:
+                    reasons.append(f"领涨股{leader}({leader_change:+.1f}%)")
+                    opp.leader_stock_name = leader
+                    
             except Exception as e:
-                logger.warning(f"[板块机会] 解析东财数据失败: {e}")
+                logger.warning(f"[板块机会] 解析同花顺数据失败: {e}")
         
         # 涨停股数量
-        # 需要匹配行业名称（东财和申万命名可能不同）
         for industry_name, count in zt_count_map.items():
             if opp.sector_name in industry_name or industry_name in opp.sector_name:
                 opp.zt_count = count
-                if count >= 5:
-                    score += 1
-                    reasons.append(f"涨停{count}只（赚钱效应强）")
-                elif count >= 3:
-                    score += 1
-                    reasons.append(f"涨停{count}只（有赚钱效应）")
+                reasons.append(f"涨停{count}只")
                 break
         
-        opp.reversal_score = min(score, 3)
+        opp.reversal_score = 0  # 不再规则评分，由 LLM 判断
         opp.reversal_reasons = reasons
     
     def _generate_recommendation(self, opp: SectorOpportunity) -> None:
-        """生成推荐理由和风险提示"""
-        opp.total_score = opp.cheap_score + opp.catalyst_score + opp.reversal_score
+        """
+        汇总数据，生成基础推荐信息
         
-        # 统计满足条件数（便宜维度阈值调整为>=2，因为最高4分）
-        conditions_met = sum([
-            opp.cheap_score >= 2,
-            opp.catalyst_score >= 1,
-            opp.reversal_score >= 1
-        ])
-        
-        # 生成推荐理由
+        注意：只汇总数据，不做评分判断，深度分析由 llm_mapreduce 中的 LLM 完成
+        """
+        # 汇总所有原因供 LLM 参考
         all_reasons = opp.cheap_reasons + opp.catalyst_reasons + opp.reversal_reasons
         
-        # 添加筹码分析结论
         if opp.chip_analysis:
             all_reasons.append(f"筹码: {opp.chip_analysis}")
         
-        if conditions_met >= 2:
-            opp.recommendation = f"【推荐埋伏】满足{conditions_met}/3条件。" + "；".join(all_reasons[:4])
-        elif conditions_met == 1:
-            opp.recommendation = f"【观察】仅满足1个条件。" + "；".join(all_reasons[:3])
-        else:
-            opp.recommendation = f"【暂不推荐】条件不足。"
+        opp.total_score = 0  # 不再规则评分
+        opp.recommendation = "；".join(all_reasons[:5]) if all_reasons else "暂无数据"
         
-        # 风险提示
+        # 基础风险提示
         risks = []
-        if opp.cheap_score == 0:
-            risks.append("估值不便宜")
-        if opp.catalyst_score == 0:
-            risks.append("缺乏催化剂")
-        if opp.reversal_score == 0:
-            risks.append("尚无反转信号")
-        # 筹码风险提示
         if opp.avg_profit_ratio > 0.80:
             risks.append("获利盘过高，注意抛压")
-        opp.risk_warning = "；".join(risks) if risks else "暂无明显风险"
+        opp.risk_warning = "；".join(risks) if risks else ""
     
     def find_opportunity_sectors(self, fast_mode: bool = True, use_smart_search: bool = True, 
                                    analyze_chips: bool = True) -> List[SectorOpportunity]:
         """
         寻找符合埋伏条件的板块
         
+        数据来源：
+        - 申万一级行业估值数据（sw_index_first_info）
+        - 同花顺行业板块实时数据（stock_board_industry_summary_ths）
+        - 同花顺行业指数历史数据（stock_board_industry_index_ths）
+        
         Args:
             fast_mode: 快速模式，跳过耗时的历史数据计算
             use_smart_search: 是否使用智能搜索获取催化剂信息
-            analyze_chips: 是否分析筹码集中度（会增加API调用）
+            analyze_chips: 是否分析筹码集中度（简化版，获取领涨股信息）
         
         Returns:
             按总分排序的板块机会列表
@@ -2850,21 +2503,26 @@ class SectorOpportunityAnalyzer:
             logger.error("[板块机会] 无法获取申万行业数据")
             return opportunities
         
-        # 2. 获取东财行业板块实时数据
-        em_df = self._get_em_industry_realtime()
+        # 2. 获取同花顺行业板块实时数据
+        ths_df = self._get_ths_industry_summary()
         
         # 3. 获取涨停股池按行业统计
         zt_count_map = self._get_zt_pool_by_industry()
         
-        # 4. 获取概念板块数据（一次性获取，避免重复调用）
-        concept_df = self._call_akshare_with_retry(ak.stock_board_concept_name_em, "概念板块")
+        # 4. 概念板块数据已在 _get_concept_rankings 中获取，这里不再单独获取
+        # （同花顺概念板块需要逐个调用，效率低，改为在催化剂分析中使用智能搜索）
         
-        # 5. 批量计算价格分位数（如果不是快速模式）
-        price_percentiles: Optional[Dict[str, float]] = None
-        if not fast_mode:
-            logger.info("[板块机会] 计算历史价格分位数（耗时较长）...")
-            symbols = [str(row['行业代码']).replace('.SI', '') for _, row in sw_df.iterrows()]
-            price_percentiles = self._calculate_price_percentile_batch(symbols)
+        # 5. 批量计算价格分位数（使用同花顺历史数据）
+        price_percentiles: Dict[str, float] = {}
+        if not fast_mode and ths_df is not None and not ths_df.empty:
+            logger.info("[板块机会] 计算历史价格分位数（同花顺数据）...")
+            for _, row in ths_df.iterrows():
+                sector_name = str(row.get('板块', ''))
+                if sector_name:
+                    percentile = self._calculate_price_percentile_ths(sector_name)
+                    price_percentiles[sector_name] = percentile
+                    time.sleep(0.5)  # 避免请求过快
+            logger.info(f"[板块机会] 完成 {len(price_percentiles)} 个板块的价格分位数计算")
         
         # 6. 初始化智能搜索服务（如果启用）
         smart_search = None
@@ -2912,7 +2570,7 @@ class SectorOpportunityAnalyzer:
                         )
                         sector_search_results[sector_name] = result
                         logger.info(f"[板块机会] {sector_name} 智能搜索完成")
-                        time.sleep(0.5)  # 避免请求过快
+                        time.sleep(2)  # 避免请求过快
                     except Exception as e:
                         logger.warning(f"[板块机会] {sector_name} 智能搜索失败: {e}")
         
@@ -2929,384 +2587,59 @@ class SectorOpportunityAnalyzer:
                 sector_code=sector_code
             )
             
-            # 匹配东财数据（提前匹配，用于筹码分析）
-            em_row = None
-            em_sector_name = None
-            if em_df is not None and not em_df.empty:
-                matched = em_df[em_df['板块名称'].str.contains(sector_name[:2], na=False)]
-                if not matched.empty:
-                    em_row = matched.iloc[0]
-                    em_sector_name = str(em_row.get('板块名称', ''))
+            # 匹配同花顺数据
+            ths_row = None
+            ths_sector_name = None
+            if ths_df is not None and not ths_df.empty:
+                ths_sector = self._find_ths_sector(sector_name)
+                if ths_sector:
+                    matched = ths_df[ths_df['板块'] == ths_sector]
+                    if not matched.empty:
+                        ths_row = matched.iloc[0]
+                        ths_sector_name = ths_sector
             
-            # 分析筹码集中度（在 _analyze_cheap 之前，因为筹码数据会影响便宜得分）
+            # 分析筹码/领涨股信息
             if analyze_chips:
-                # 只对低估值板块进行筹码分析（减少API调用）
+                # 只对低估值板块进行分析（减少API调用）
                 pe = float(sw_row.get('TTM(滚动)市盈率', 100) or 100)
                 dividend = float(sw_row.get('静态股息率', 0) or 0)
                 if pe < 25 or dividend > 2.5:
-                    self._analyze_sector_chips(opp, em_sector_name)
+                    self._analyze_sector_chips(opp, ths_sector_name)
             
             # 分析三个维度
-            self._analyze_cheap(opp, sw_row, price_percentiles)
+            self._analyze_cheap(opp, sw_row, price_percentiles, ths_sector_name)
             
             # 获取该板块的智能搜索结果（如果有）
             search_result = sector_search_results.get(sector_name)
-            self._analyze_catalyst(opp, concept_df, search_result)
+            self._analyze_catalyst(opp, search_result=search_result)
             
-            self._analyze_reversal(opp, em_row, zt_count_map)
+            self._analyze_reversal(opp, ths_row, zt_count_map)
             
             # 生成推荐
             self._generate_recommendation(opp)
             
             opportunities.append(opp)
         
-        # 9. 按总分排序
-        opportunities.sort(key=lambda x: (x.total_score, x.cheap_score), reverse=True)
+        # 9. 按价格分位数排序（估值最低的排前面，无数据的排最后）
+        opportunities.sort(key=lambda x: x.price_percentile if x.price_percentile >= 0 else 999)
         
         # 10. 输出分析结果
         logger.info(f"[板块机会] 分析完成，共 {len(opportunities)} 个行业")
         
-        # 输出推荐的板块
-        recommended = [o for o in opportunities if o.total_score >= 4]
-        if recommended:
-            logger.info(f"[板块机会] 推荐埋伏 {len(recommended)} 个板块:")
-            for opp in recommended[:5]:
-                logger.info(f"  - {opp.sector_name}: 总分{opp.total_score} "
-                          f"(便宜:{opp.cheap_score} 催化:{opp.catalyst_score} 反转:{opp.reversal_score})")
+        # 输出估值最低的板块
+        valid_opps = [o for o in opportunities if o.price_percentile >= 0]
+        if valid_opps:
+            logger.info(f"[板块机会] 估值最低的5个板块:")
+            for opp in valid_opps[:5]:
+                logger.info(f"  - {opp.sector_name}: 价格分位{opp.price_percentile:.0f}% "
+                          f"PE:{opp.current_pe:.1f} 股息率:{opp.dividend_yield:.1f}%")
+        else:
+            logger.info("[板块机会] 未获取到有效的价格分位数据")
         
         logger.info("========== 板块机会分析完成 ==========")
         
         return opportunities
     
-    def _build_opportunity_prompt(self, opportunities: List[SectorOpportunity]) -> str:
-        """
-        构建板块机会分析的 LLM 提示词
-        
-        将所有板块数据整理成结构化的提示词，供 LLM 进行深度分析
-        
-        Args:
-            opportunities: 板块机会列表
-            
-        Returns:
-            格式化的提示词
-        """
-        # 分类板块
-        recommended = [o for o in opportunities if o.total_score >= 4]
-        watching = [o for o in opportunities if o.total_score == 3]
-        cheapest = sorted(opportunities, key=lambda x: x.price_percentile)[:10]
-        hottest = sorted(opportunities, key=lambda x: x.reversal_score, reverse=True)[:10]
-        
-        # 构建数据表格
-        def format_sector_data(opp: SectorOpportunity) -> str:
-            return (f"| {opp.sector_name} | {opp.total_score} | {opp.cheap_score} | "
-                   f"{opp.catalyst_score} | {opp.reversal_score} | "
-                   f"{opp.current_pe:.1f} | {opp.current_pb:.1f} | "
-                   f"{opp.dividend_yield:.1f}% | {opp.price_percentile:.0f}% |")
-        
-        # 推荐板块详情
-        recommended_details = ""
-        for i, opp in enumerate(recommended[:8], 1):
-            # 筹码信息
-            chip_info = ""
-            if opp.avg_chip_concentration > 0:
-                chip_info = f"""
-**筹码分析**：
-- 板块平均筹码集中度: {opp.avg_chip_concentration:.1%}
-- 板块平均获利比例: {opp.avg_profit_ratio:.1%}
-- 龙头股: {opp.leader_stock_name}（集中度{opp.leader_chip_concentration:.1%}，获利{opp.leader_profit_ratio:.1%}）
-- 筹码结论: {opp.chip_analysis}
-"""
-            
-            recommended_details += f"""
-### {i}. {opp.sector_name}（总分 {opp.total_score}/10）
-
-**估值数据**：
-- PE: {opp.current_pe:.1f}倍
-- PB: {opp.current_pb:.1f}倍
-- 股息率: {opp.dividend_yield:.1f}%
-- 价格分位数: {opp.price_percentile:.0f}%（3年历史）
-{chip_info}
-**够便宜分析**（得分 {opp.cheap_score}/4）：
-{chr(10).join('- ' + r for r in opp.cheap_reasons) if opp.cheap_reasons else '- 暂无明显便宜信号'}
-
-**有催化分析**（得分 {opp.catalyst_score}/3）：
-- 关注催化关键词: {', '.join(opp.policy_keywords[:5]) if opp.policy_keywords else '无'}
-{chr(10).join('- ' + r for r in opp.catalyst_reasons) if opp.catalyst_reasons else '- 暂无明显催化剂'}
-
-**有反转分析**（得分 {opp.reversal_score}/3）：
-- 今日涨跌幅: {opp.recent_5d_change:+.1f}%
-- 涨停股数量: {opp.zt_count}只
-- 换手率: {opp.volume_ratio:.1f}%
-{chr(10).join('- ' + r for r in opp.reversal_reasons) if opp.reversal_reasons else '- 暂无反转信号'}
-
-"""
-        
-        # 估值最低板块
-        cheapest_table = "| 板块 | PE | PB | 股息率 | 价格分位 | 筹码集中度 | 获利比例 |\n|------|-----|-----|--------|----------|------------|----------|\n"
-        for opp in cheapest:
-            chip_conc = f"{opp.avg_chip_concentration:.0%}" if opp.avg_chip_concentration > 0 else "-"
-            profit_ratio = f"{opp.avg_profit_ratio:.0%}" if opp.avg_profit_ratio > 0 else "-"
-            cheapest_table += f"| {opp.sector_name} | {opp.current_pe:.1f} | {opp.current_pb:.1f} | {opp.dividend_yield:.1f}% | {opp.price_percentile:.0f}% | {chip_conc} | {profit_ratio} |\n"
-        
-        # 今日最活跃板块
-        hottest_table = "| 板块 | 涨跌幅 | 涨停数 | 换手率 | 反转得分 |\n|------|--------|--------|--------|----------|\n"
-        for opp in hottest:
-            hottest_table += f"| {opp.sector_name} | {opp.recent_5d_change:+.1f}% | {opp.zt_count} | {opp.volume_ratio:.1f}% | {opp.reversal_score}/3 |\n"
-        
-        prompt = f"""你是一位专业的A股行业分析师，擅长发现板块埋伏机会。请根据以下数据进行深度分析。您也可以基于您的理解，进行网络搜寻。
-
-# 板块埋伏机会分析
-
-## 核心埋伏逻辑
-
-在A股埋伏板块，必须同时满足以下三个条件中的至少两个，胜率才高：
-
-1. **够便宜（安全垫）**（最高4分）：
-   - 经历了长时间调整，估值在历史底部
-   - PE/PB处于历史低位（分位数<30%）
-   - 机构仓位低，散户绝望
-   - 高股息率提供安全边际
-   - **筹码集中度低（<15%）表示主力控盘**
-   - **获利比例低（<40%）表示抛压已释放**
-
-2. **有催化（导火索）**（最高3分）：
-   - 未来3-6个月内有确定的政策预期（如"十五五"规划）
-   - 技术突破或产品落地
-   - 行业重大事件或政策利好
-
-3. **有反转（基本面）**（最高3分）：
-   - 行业供需格局改善
-   - 从"杀估值"转向"杀业绩"结束
-   - 资金开始流入，涨停股增多
-   - 龙虎榜机构净买入
-
----
-
-## 当前市场数据
-
-### 一、推荐埋伏板块（总分≥4）
-
-共有 **{len(recommended)}** 个板块符合推荐条件：
-
-{recommended_details if recommended_details else '暂无符合条件的板块'}
-
-### 二、观察板块（总分=3）
-
-共有 **{len(watching)}** 个板块处于观察状态。
-
-### 三、估值最低板块 TOP10（含筹码数据）
-
-{cheapest_table}
-
-### 四、今日最活跃板块 TOP10
-
-{hottest_table}
-
----
-
-## 筹码分析说明
-
-筹码集中度和获利比例是判断板块安全边际的重要指标：
-- **筹码集中度**：90%筹码的价格区间占比，越低表示筹码越集中，主力控盘程度越高
-- **获利比例**：当前价格下的获利筹码占比，越低表示套牢盘越重，但也意味着抛压已释放
-
-理想的埋伏标的：筹码集中度<15%（主力控盘）+ 获利比例<40%（抛压枯竭）
-
----
-
-## 分析任务
-
-请基于以上数据，生成一份专业的【板块埋伏机会深度分析报告】，包含：
-
-### 输出格式要求
-
-请直接输出 Markdown 格式的分析报告，包含以下章节：
-
-## 🎯 板块埋伏机会深度分析
-
-### 一、核心推荐（最值得埋伏的2-3个板块）
-
-对于每个推荐板块，请分析：
-1. 为什么便宜？（估值分析、历史对比、筹码状态）
-2. 催化剂是什么？（政策、技术、事件）
-3. 反转信号有哪些？（资金、量能、赚钱效应）
-4. 具体埋伏策略（时机、仓位、止损）
-
-### 二、潜力观察（值得关注但时机未到的板块）
-
-分析哪些板块虽然暂时不满足条件，但可能即将满足
-
-### 三、风险警示（需要回避的板块）
-
-哪些板块看似便宜但有陷阱？特别关注获利盘过高的板块
-
-### 四、操作建议
-
-1. 短期（1-2周）：哪些板块可以开始建仓？
-2. 中期（1-3月）：哪些板块值得持续跟踪？
-3. 仓位建议：如何分配资金？
-
-### 五、风险提示
-
-当前市场环境下的主要风险点
-
----
-
-请直接输出分析报告，不要输出 JSON 格式。
-"""
-        return prompt
-    
-    def generate_ai_opportunity_report(self, opportunities: List[SectorOpportunity]) -> Optional[str]:
-        """
-        使用 LLM 生成板块机会深度分析报告
-        
-        Args:
-            opportunities: 板块机会列表
-            
-        Returns:
-            AI 生成的深度分析报告，如果 LLM 不可用则返回 None
-        """
-        if not self.analyzer or not self.analyzer.is_available():
-            logger.warning("[板块机会] AI分析器未配置或不可用，无法生成深度分析")
-            return None
-        
-        try:
-            logger.info("[板块机会] 开始调用 LLM 生成深度分析报告...")
-            
-            # 构建提示词
-            prompt = self._build_opportunity_prompt(opportunities)
-            logger.info(f"[板块机会] Prompt 长度: {len(prompt)} 字符")
-            
-            # 调用 LLM
-            generation_config = {
-                'temperature': 0.7,
-            }
-            
-            report = self.analyzer._call_openai_api(prompt, generation_config)
-            
-            if report:
-                logger.info(f"[板块机会] AI 深度分析报告生成成功，长度: {len(report)} 字符")
-                return report
-            else:
-                logger.warning("[板块机会] LLM 返回为空")
-                return None
-                
-        except Exception as e:
-            logger.error(f"[板块机会] LLM 生成深度分析失败: {e}")
-            return None
-    
-    def generate_opportunity_report(self, opportunities: List[SectorOpportunity], use_ai: bool = True) -> str:
-        """
-        生成板块机会报告
-        
-        Args:
-            opportunities: 板块机会列表
-            use_ai: 是否使用 AI 生成深度分析（默认 True）
-            
-        Returns:
-            Markdown格式的报告
-        """
-        # 如果有 AI 分析器且启用 AI，尝试生成深度分析
-        if use_ai and self.analyzer:
-            ai_report = self.generate_ai_opportunity_report(opportunities)
-            if ai_report:
-                # 添加数据摘要头部
-                recommended = [o for o in opportunities if o.total_score >= 4]
-                header = f"""## 🎯 板块埋伏机会分析（AI 深度版）
-
-> 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-> 分析板块: {len(opportunities)} 个申万一级行业
-> 推荐埋伏: {len(recommended)} 个板块
-
----
-
-"""
-                return header + ai_report
-        
-        # 降级到模板报告
-        return self._generate_template_opportunity_report(opportunities)
-    
-    def _generate_template_opportunity_report(self, opportunities: List[SectorOpportunity]) -> str:
-        """
-        使用模板生成板块机会报告（无 LLM 时的备选方案）
-        
-        Args:
-            opportunities: 板块机会列表
-            
-        Returns:
-            Markdown格式的报告
-        """
-        report = f"""## 🎯 板块埋伏机会分析
-
-> 埋伏逻辑：必须同时满足以下三个条件中的至少两个
-> 1. **够便宜**：估值在历史底部，机构仓位低，筹码集中度低
-> 2. **有催化**：未来有政策预期、技术突破或产品落地
-> 3. **有反转**：行业供需改善，资金开始流入
-
----
-
-### 📊 推荐埋伏板块
-
-"""
-        # 推荐板块（总分>=4）
-        recommended = [o for o in opportunities if o.total_score >= 4]
-        
-        if recommended:
-            for i, opp in enumerate(recommended[:5], 1):
-                # 筹码信息
-                chip_info = ""
-                if opp.avg_chip_concentration > 0:
-                    chip_info = f"筹码集中度:{opp.avg_chip_concentration:.0%} 获利比例:{opp.avg_profit_ratio:.0%}"
-                    if opp.leader_stock_name:
-                        chip_info += f" 龙头:{opp.leader_stock_name}"
-                
-                report += f"""#### {i}. {opp.sector_name} ⭐ 总分: {opp.total_score}/10
-
-| 维度 | 得分 | 说明 |
-|------|------|------|
-| 够便宜 | {opp.cheap_score}/4 | PE:{opp.current_pe:.1f} PB:{opp.current_pb:.1f} 股息率:{opp.dividend_yield:.1f}% |
-| 有催化 | {opp.catalyst_score}/3 | {', '.join(opp.catalyst_reasons[:2]) if opp.catalyst_reasons else '暂无明显催化'} |
-| 有反转 | {opp.reversal_score}/3 | {', '.join(opp.reversal_reasons[:2]) if opp.reversal_reasons else '暂无反转信号'} |
-
-"""
-                if chip_info:
-                    report += f"**筹码分析**: {chip_info}\n\n"
-                if opp.chip_analysis:
-                    report += f"**筹码结论**: {opp.chip_analysis}\n\n"
-                
-                report += f"""**推荐理由**: {opp.recommendation}
-
-**风险提示**: {opp.risk_warning}
-
----
-
-"""
-        else:
-            report += "暂无符合条件的推荐板块。\n\n"
-        
-        # 观察板块（总分3）
-        watching = [o for o in opportunities if o.total_score == 3]
-        if watching:
-            report += "### 👀 观察板块\n\n"
-            for opp in watching[:5]:
-                chip_note = f" 筹码:{opp.avg_chip_concentration:.0%}" if opp.avg_chip_concentration > 0 else ""
-                report += f"- **{opp.sector_name}**: 总分{opp.total_score} (便宜:{opp.cheap_score} 催化:{opp.catalyst_score} 反转:{opp.reversal_score}){chip_note}\n"
-            report += "\n"
-        
-        # 估值最低板块（含筹码数据）
-        cheapest = sorted(opportunities, key=lambda x: x.price_percentile)[:5]
-        report += "### 💰 估值最低板块（价格分位数）\n\n"
-        report += "| 板块 | 价格分位 | PE | PB | 筹码集中度 | 获利比例 |\n"
-        report += "|------|----------|-----|-----|------------|----------|\n"
-        for opp in cheapest:
-            chip_conc = f"{opp.avg_chip_concentration:.0%}" if opp.avg_chip_concentration > 0 else "-"
-            profit_ratio = f"{opp.avg_profit_ratio:.0%}" if opp.avg_profit_ratio > 0 else "-"
-            report += f"| {opp.sector_name} | {opp.price_percentile:.0f}% | {opp.current_pe:.1f} | {opp.current_pb:.1f} | {chip_conc} | {profit_ratio} |\n"
-        
-        report += f"\n---\n*分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
-        
-        return report
-
 
 # 测试入口
 if __name__ == "__main__":
@@ -3319,22 +2652,19 @@ if __name__ == "__main__":
     )
     
     # 测试板块机会分析
-    print("=== 测试板块机会分析 ===")
+    print("=== 测试板块数据获取 ===")
     opportunity_analyzer = SectorOpportunityAnalyzer()
     opportunities = opportunity_analyzer.find_opportunity_sectors(fast_mode=True)
     
-    print(f"\n共分析 {len(opportunities)} 个行业")
-    print("\n前5个推荐板块:")
+    print(f"\n共获取 {len(opportunities)} 个行业数据")
+    print("\n估值最低的5个板块:")
     for i, opp in enumerate(opportunities[:5], 1):
-        print(f"{i}. {opp.sector_name}: 总分{opp.total_score} "
-              f"(便宜:{opp.cheap_score} 催化:{opp.catalyst_score} 反转:{opp.reversal_score})")
+        print(f"{i}. {opp.sector_name}: 价格分位{opp.price_percentile:.0f}%")
         print(f"   PE:{opp.current_pe:.1f} PB:{opp.current_pb:.1f} 股息率:{opp.dividend_yield:.1f}%")
         if opp.cheap_reasons:
-            print(f"   便宜: {', '.join(opp.cheap_reasons[:2])}")
-        if opp.reversal_reasons:
-            print(f"   反转: {', '.join(opp.reversal_reasons[:2])}")
+            print(f"   数据: {', '.join(opp.cheap_reasons[:2])}")
     
-    # 生成报告
-    print("\n=== 生成板块机会报告 ===")
-    report = opportunity_analyzer.generate_opportunity_report(opportunities)
+    # 生成数据报告
+    print("\n=== 生成板块数据报告 ===")
+    report = opportunity_analyzer.generate_template_report(opportunities)
     print(report[:1500] + "..." if len(report) > 1500 else report)
