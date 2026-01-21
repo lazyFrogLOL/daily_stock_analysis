@@ -42,6 +42,14 @@ jobs:
         run: |
           mkdir -p data logs reports
       
+      - name: 恢复 SQLite 缓存
+        uses: actions/cache@v4
+        with:
+          path: data/stock_analysis.db
+          key: sqlite-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            sqlite-cache-${{ runner.os }}-
+      
       - name: 执行股票分析
         env:
           # ========== AI 分析服务（OpenAI 兼容 API）==========

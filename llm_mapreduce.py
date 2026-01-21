@@ -1276,6 +1276,214 @@ class SectorOpportunityAnalyst(DimensionAnalyst):
 请用专业但易懂的语言，直接输出分析报告。"""
 
 
+class TradingGuideAnalyst(DimensionAnalyst):
+    """
+    明日实操指南分析师 - 专注生成具体可执行的交易计划
+    
+    核心职责：
+    1. 基于当天市场数据，生成明日具体操作建议
+    2. 提供具体的股票/板块、入场条件、仓位建议
+    3. 设定明确的止损止盈点位
+    4. 区分不同风险偏好的操作策略
+    """
+    
+    @property
+    def dimension_name(self) -> str:
+        return "明日实操指南"
+    
+    @property
+    def analyst_role(self) -> str:
+        return "实战交易策略师，专注将分析转化为可执行的交易计划"
+    
+    def build_prompt(self, data: Dict[str, Any]) -> str:
+        overview = data.get('overview', {})
+        
+        # ========== 涨停股池（明日接力候选）==========
+        zt_pool = overview.get('zt_pool', [])
+        zt_pool_text = ""
+        if zt_pool:
+            zt_pool_text = "| 股票 | 连板 | 封板资金 | 炸板次数 | 行业 | 换手率 |\n|------|------|----------|----------|------|--------|\n"
+            for zt in zt_pool[:15]:
+                turnover = zt.get('turnover_rate', 0)
+                zt_pool_text += f"| {zt.get('name', '')} | {zt.get('continuous', 1)}板 | {zt.get('seal_amount', 0):.1f}亿 | {zt.get('zb_count', 0)}次 | {zt.get('industry', '')} | {turnover:.1f}% |\n"
+        
+        # ========== 昨日涨停今日表现（溢价率参考）==========
+        previous_zt = overview.get('previous_zt_pool', [])
+        previous_zt_text = ""
+        if previous_zt:
+            previous_zt_text = "| 股票 | 今日涨跌 | 昨日连板 | 行业 |\n|------|----------|----------|------|\n"
+            for pzt in previous_zt[:10]:
+                previous_zt_text += f"| {pzt.get('name', '')} | {pzt.get('change_pct', 0):+.2f}% | {pzt.get('yesterday_continuous', 1)}板 | {pzt.get('industry', '')} |\n"
+        
+        # ========== 强势股池（低吸候选）==========
+        strong_pool = overview.get('strong_pool', [])
+        strong_pool_text = ""
+        if strong_pool:
+            strong_pool_text = "| 股票 | 涨跌幅 | 行业 | 特征 |\n|------|--------|------|------|\n"
+            for sp in strong_pool[:10]:
+                strong_pool_text += f"| {sp.get('name', '')} | {sp.get('change_pct', 0):+.2f}% | {sp.get('industry', '')} | {sp.get('feature', '')} |\n"
+        
+        # ========== 潜力股（埋伏候选）==========
+        hidden_stocks = overview.get('hidden_inflow_stocks', [])
+        hidden_text = ""
+        if hidden_stocks:
+            hidden_text = "| 股票 | 大笔买入 | 关注指数 | 综合得分 | 今日涨跌 | 行业 |\n|------|----------|----------|----------|----------|------|\n"
+            for hs in hidden_stocks[:10]:
+                hidden_text += f"| {hs.get('name', '')} | {hs.get('big_buy_count', 0)}次 | {hs.get('attention', 0):.0f} | {hs.get('score', 0):.0f} | {hs.get('change_pct', 0):+.2f}% | {hs.get('industry', '')} |\n"
+        
+        # ========== 板块数据 ==========
+        top_sectors = overview.get('top_sectors', [])
+        top_sectors_text = ""
+        if top_sectors:
+            for s in top_sectors[:8]:
+                net_inflow = s.get('net_inflow', 0)
+                leader = s.get('leader_stock', '')
+                top_sectors_text += f"- {s.get('name', '')}: {s.get('change_pct', 0):+.2f}% 净流入{net_inflow:.2f}亿 领涨:{leader}\n"
+        
+        # ========== 推荐埋伏板块 ==========
+        sector_recommended = overview.get('sector_recommended', [])
+        sector_text = ""
+        if sector_recommended:
+            sector_text = "| 板块 | 总分 | 便宜 | 催化 | 反转 | PE | 推荐理由 |\n|------|------|------|------|------|-----|----------|\n"
+            for opp in sector_recommended[:5]:
+                reasons = opp.get('cheap_reasons', [])[:1] + opp.get('catalyst_reasons', [])[:1]
+                reason_text = '; '.join(reasons)[:25] if reasons else '-'
+                sector_text += f"| {opp.get('sector_name', '')} | {opp.get('total_score', 0)} | {opp.get('cheap_score', 0)} | {opp.get('catalyst_score', 0)} | {opp.get('reversal_score', 0)} | {opp.get('current_pe', 0):.1f} | {reason_text} |\n"
+        
+        # ========== 千股千评高分股 ==========
+        comment_top = overview.get('comment_top_stocks', [])
+        comment_text = ""
+        if comment_top:
+            comment_text = "| 股票 | 综合得分 | 排名变化 | 涨跌幅 | 机构参与度 |\n|------|----------|----------|--------|------------|\n"
+            for stock in comment_top[:8]:
+                rank_change = stock.get('rank_change', 0)
+                rank_str = f"+{rank_change}" if rank_change > 0 else str(rank_change)
+                comment_text += f"| {stock.get('name', '')} | {stock.get('score', 0):.0f} | {rank_str} | {stock.get('change_pct', 0):+.2f}% | {stock.get('org_participate', 0):.1f}% |\n"
+        
+        # ========== 风险数据 ==========
+        zb_rate = overview.get('zb_rate', 0)
+        dt_count = overview.get('dt_pool_count', 0)
+        previous_zt_avg = overview.get('previous_zt_avg_change', 0)
+        
+        return f"""你是一位实战派交易策略师，拥有 15 年 A 股短线交易经验，年化收益稳定在 50% 以上。你的核心能力是将市场分析转化为具体可执行的交易计划。
+
+## 你的交易哲学
+- 只做确定性高的机会，宁可错过不可做错
+- 严格执行止损，保护本金是第一要务
+- 仓位管理比选股更重要
+- 顺势而为，不与市场对抗
+- 分散风险，单票不超过 20% 仓位
+
+## 今日市场核心数据
+
+**市场情绪指标**
+- 涨停 {overview.get('limit_up_count', 0)} 只 / 跌停 {overview.get('limit_down_count', 0)} 只
+- 炸板率: {zb_rate:.1f}%（<15% 情绪好，>25% 情绪差）
+- 昨日涨停今日溢价: {previous_zt_avg:+.2f}%（>0 赚钱效应好）
+- 上涨 {overview.get('up_count', 0)} 家 / 下跌 {overview.get('down_count', 0)} 家
+- 两市成交: {overview.get('total_amount', 0):.0f} 亿
+
+**今日涨停股（明日接力候选）**
+{zt_pool_text if zt_pool_text else "暂无数据"}
+
+**昨日涨停今日表现（溢价率参考）**
+{previous_zt_text if previous_zt_text else "暂无数据"}
+
+**强势股池（低吸候选）**
+{strong_pool_text if strong_pool_text else "暂无数据"}
+
+**潜力股（埋伏候选）**
+{hidden_text if hidden_text else "暂无数据"}
+
+**领涨板块**
+{top_sectors_text if top_sectors_text else "暂无数据"}
+
+**推荐埋伏板块**
+{sector_text if sector_text else "暂无数据"}
+
+**千股千评高分股**
+{comment_text if comment_text else "暂无数据"}
+
+---
+
+## 请输出明日实操指南
+
+### 一、明日市场预判
+
+（基于今日数据，预判明日大盘走势和情绪，给出操作基调）
+
+### 二、仓位管理建议
+
+| 市场状态 | 建议仓位 | 操作策略 |
+|----------|----------|----------|
+| 情绪亢奋 | ?% | ... |
+| 情绪温和 | ?% | ... |
+| 情绪低迷 | ?% | ... |
+
+（根据今日情绪状态，给出明日建议仓位）
+
+### 三、具体操作计划
+
+#### 3.1 打板/接力策略（激进型）
+
+**适合人群**: 风险偏好高，有盯盘时间，熟悉短线操作
+
+| 标的 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|------|----------|----------|--------|--------|------|------|
+| ... | 首板打板/二板接力 | 具体条件 | +?% | -?% | ?% | 简要逻辑 |
+
+**注意事项**: 
+- ...
+
+#### 3.2 低吸策略（稳健型）
+
+**适合人群**: 风险偏好中等，有一定耐心，追求稳定收益
+
+| 标的 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|------|----------|----------|--------|--------|------|------|
+| ... | 回调低吸 | 具体条件 | +?% | -?% | ?% | 简要逻辑 |
+
+**注意事项**: 
+- ...
+
+#### 3.3 埋伏策略（保守型）
+
+**适合人群**: 风险偏好低，追求中长期收益，不频繁操作
+
+| 标的/板块 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|-----------|----------|----------|--------|--------|------|------|
+| ... | 左侧埋伏 | 具体条件 | +?% | -?% | ?% | 简要逻辑 |
+
+**注意事项**: 
+- ...
+
+### 四、风险控制要点
+
+1. **必须止损的情况**: ...
+2. **需要减仓的信号**: ...
+3. **明日需要回避的方向**: ...
+
+### 五、盘中关注要点
+
+| 时间段 | 关注重点 | 操作建议 |
+|--------|----------|----------|
+| 9:15-9:25 | 集合竞价 | ... |
+| 9:30-10:00 | 开盘半小时 | ... |
+| 10:00-11:30 | 上午盘 | ... |
+| 13:00-14:30 | 下午盘 | ... |
+| 14:30-15:00 | 尾盘 | ... |
+
+### 六、操作纪律提醒
+
+（根据今日市场状态，给出明日操作的核心纪律）
+
+---
+
+**重要声明**: 以上建议仅供参考，不构成投资建议。股市有风险，投资需谨慎。请根据自身风险承受能力做出决策。
+
+请直接输出完整的实操指南，确保每个建议都是具体、可执行的。"""
+
+
 class CommentScoreAnalyst(DimensionAnalyst):
     """千股千评分析师 - 专注市场整体评分和高分股挖掘"""
     
@@ -1424,7 +1632,7 @@ class MarketMapReduceAnalyzer:
     2. Reduce 阶段：首席分析师综合各维度结论
     """
     
-    # 默认维度分析师（10个维度，全面覆盖市场数据）
+    # 默认维度分析师（11个维度，全面覆盖市场数据）
     DEFAULT_ANALYSTS = [
         EmotionAnalyst,      # 市场情绪
         ThemeAnalyst,        # 主线题材
@@ -1437,6 +1645,7 @@ class MarketMapReduceAnalyzer:
         HiddenInflowAnalyst, # 潜力股挖掘
         SectorOpportunityAnalyst,  # 板块埋伏
         CommentScoreAnalyst, # 千股千评
+        TradingGuideAnalyst, # 明日实操指南（新增）
     ]
     
     def __init__(self, llm_caller: Callable[[str, dict], str], 
@@ -1586,11 +1795,19 @@ class MarketMapReduceAnalyzer:
         
         # 构建 Reduce Prompt
         reduce_prompt = f"""你是一位 A 股首席策略分析师，拥有 20 年市场研究经验。您擅长的事项如下：
-        1. 从政策变化中，提前捕捉后续的趋势性机会。
-        2. 从资金的变化中，能准确关注到您的同行们实际上在布局哪些方向。
-        3. 盘感极强，从各类数据中能够交叉挖掘出最有价值的信息，交易点位把握极其精准。
-        4. 深谙各种宏观->股市微观层面布局的潜规则，对各种国家政策实际要达到的目标非常理解。
-        5. 充分理解各种量化指标，对各种因子的理解远超众人。
+1. 政策解码与抢跑卡位（Policy Alpha） 不仅仅是阅读文件，而是具备**“顶层设计穿透力”**。擅长从晦涩的公文措辞变动中，精准预判政策落地的强度与路径，在市场形成一致性预期（Consensus）之前，提前左侧潜伏，吃满主升浪中最肥美的一段“政策溢价”。
+
+2. 资金博弈与机构行为学（Flow Analysis） 不看表面的资金流向，专注于**“拆解对手盘”**。透过龙虎榜、大宗交易及席位追踪，精准识破公募、游资与量化机构的“明修栈道、暗度陈仓”。当同行还在看K线时，我已经看透了控盘主力的底牌。
+
+3. 鹰眼盘感与情绪周期（Market Sentiment） 拥有20年肌肉记忆的**“盘面狙击手”**。擅长多维数据交叉验证（量价结构、市场广度、舆情热度），在市场情绪的“冰点”敢于重仓抄底，在“高潮”时果断兑现。对关键变盘节点（拐点）的把握，精确到分钟级。
+
+4. 宏观叙事到微观落地的映射（Macro-to-Micro） 深谙“中国特色”估值体系。能迅速将宏观层面的国家意志（如新质生产力、国产替代），精准翻译成微观层面的产业链逻辑。我知道政策的“底线”在哪里，更知道国家此时此刻最想让谁涨。
+
+5. 量化思维降维打击（Quant & Factor） 以基本面为盾，以量化因子为矛。不仅理解传统技术指标，更精通风格因子轮动与拥挤度分析。我能利用量化工具发现市场的错误定价，收割那些只懂画线或只看财报的单线条选手。
+
+6. 供需重构与瓶颈挖掘（Event Driven） 新闻即信号。 我具备极其敏锐的产业链传导思维，视一切突发新闻为“供需错配”的信号弹。一眼定位产业链中产能最紧缺的**“瓶颈环节”**，遵循“哪里有瓶颈，哪里就有暴利”的铁律，快准狠地捕捉涨价题材。
+
+7. 预期差博弈与逆向投资（Expectation Gap） （补充完整） 交易的本质是交易预期。我极其善于捕捉**“大众认知与客观事实之间的裂缝”。在市场将信将疑时果断介入，在人声鼎沸时悄然离场。我赚的不是公司成长的钱，而是市场从“错误定价”回归“正确修正”过程中那笔巨大的“认知差”**暴利。
 
 现在，你的 10 位专业分析师已经从不同维度完成了今日市场的分析报告。请仔细阅读每份报告，综合所有信息，撰写一份深度的市场复盘报告。
 
@@ -1667,21 +1884,35 @@ class MarketMapReduceAnalyzer:
 ### 6.3 价值洼地
 （基于千股千评和资金流向，适合中长期布局）
 
-## 七、明日作战计划
+## 七、明日实操指南
 
-### 7.1 大盘预判
-（基于今日分析，预判明日大盘走势）
+（这是最重要的部分！基于实操指南分析师的报告，给出具体可执行的交易计划）
 
-### 7.2 操作策略
-- **激进型**：（适合风险偏好高的投资者）
-- **稳健型**：（适合普通投资者）
-- **保守型**：（适合风险厌恶型投资者）
+### 7.1 仓位建议
+（根据今日情绪状态，给出明日建议仓位）
 
-### 7.3 重点关注
-（明日重点关注的板块和方向）
+### 7.2 具体操作计划
 
-### 7.4 风险回避
-（明日需要回避的方向）
+#### 打板/接力策略（激进型）
+| 标的 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|------|----------|----------|--------|--------|------|------|
+
+#### 低吸策略（稳健型）
+| 标的 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|------|----------|----------|--------|--------|------|------|
+
+#### 埋伏策略（保守型）
+| 标的/板块 | 操作类型 | 入场条件 | 目标位 | 止损位 | 仓位 | 逻辑 |
+|-----------|----------|----------|--------|--------|------|------|
+
+### 7.3 风险控制
+- 必须止损的情况
+- 需要减仓的信号
+- 明日需要回避的方向
+
+### 7.4 盘中关注要点
+| 时间段 | 关注重点 | 操作建议 |
+|--------|----------|----------|
 
 ## 八、本报告说明
 
@@ -1697,6 +1928,8 @@ class MarketMapReduceAnalyzer:
 3. 有反转（基本面）：行业供需格局改善，从"杀估值"转向"杀业绩"结束，进入业绩修复期
 
 您不仅仅是给您的客户一份建议，更重要的是，您也需要通过这个报告，来捕捉第二天的赚钱机会，为您自己的钱包负责。
+
+**特别强调**：明日实操指南部分必须给出具体的股票代码/名称、具体的入场条件、具体的止损止盈点位，不能只是泛泛而谈。
 
 请直接输出完整的 Markdown 格式报告。"""
 
