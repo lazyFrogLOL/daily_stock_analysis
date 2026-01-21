@@ -151,7 +151,7 @@ class EmotionAnalyst(DimensionAnalyst):
         zt_pool_text = ""
         if zt_pool:
             zt_pool_text = "| 股票 | 连板 | 封板资金 | 炸板次数 | 行业 |\n|------|------|----------|----------|------|\n"
-            for zt in zt_pool[:10]:
+            for zt in zt_pool[:20]:
                 zt_pool_text += f"| {zt.get('name', '')} | {zt.get('continuous', 1)}板 | {zt.get('seal_amount', 0):.1f}亿 | {zt.get('zb_count', 0)}次 | {zt.get('industry', '')} |\n"
         
         # ========== 昨日涨停今日表现 ==========
@@ -159,7 +159,7 @@ class EmotionAnalyst(DimensionAnalyst):
         previous_zt_text = ""
         if previous_zt:
             previous_zt_text = "| 股票 | 今日涨跌 | 昨日连板 | 行业 |\n|------|----------|----------|------|\n"
-            for pzt in previous_zt[:8]:
+            for pzt in previous_zt[:20]:
                 previous_zt_text += f"| {pzt.get('name', '')} | {pzt.get('change_pct', 0):+.2f}% | {pzt.get('yesterday_continuous', 1)}板 | {pzt.get('industry', '')} |\n"
         
         # ========== 炸板股池 ==========
@@ -167,7 +167,7 @@ class EmotionAnalyst(DimensionAnalyst):
         zb_pool_text = ""
         if zb_pool:
             zb_pool_text = "| 股票 | 炸板次数 | 涨跌幅 | 行业 |\n|------|----------|--------|------|\n"
-            for zb in zb_pool[:5]:
+            for zb in zb_pool[:20]:
                 zb_pool_text += f"| {zb.get('name', '')} | {zb.get('zb_count', 0)}次 | {zb.get('change_pct', 0):+.2f}% | {zb.get('industry', '')} |\n"
         
         # ========== 盘口异动详情 ==========
@@ -178,7 +178,7 @@ class EmotionAnalyst(DimensionAnalyst):
         big_buy_text = ""
         if big_buy_list:
             big_buy_text = "| 时间 | 股票 | 板块 | 详情 |\n|------|------|------|------|\n"
-            for item in big_buy_list[:8]:
+            for item in big_buy_list[:20]:
                 big_buy_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:20]} |\n"
         
         # 大笔卖出
@@ -186,7 +186,7 @@ class EmotionAnalyst(DimensionAnalyst):
         big_sell_text = ""
         if big_sell_list:
             big_sell_text = "| 时间 | 股票 | 板块 | 详情 |\n|------|------|------|------|\n"
-            for item in big_sell_list[:5]:
+            for item in big_sell_list[:20]:
                 big_sell_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:20]} |\n"
         
         # 火箭发射
@@ -194,7 +194,7 @@ class EmotionAnalyst(DimensionAnalyst):
         rocket_text = ""
         if rocket_list:
             rocket_text = "| 时间 | 股票 | 板块 | 详情 |\n|------|------|------|------|\n"
-            for item in rocket_list[:5]:
+            for item in rocket_list[:20]:
                 rocket_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:20]} |\n"
         
         # 高台跳水
@@ -202,8 +202,40 @@ class EmotionAnalyst(DimensionAnalyst):
         dive_text = ""
         if dive_list:
             dive_text = "| 时间 | 股票 | 板块 | 详情 |\n|------|------|------|------|\n"
-            for item in dive_list[:5]:
+            for item in dive_list[:20]:
                 dive_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:20]} |\n"
+        
+        # ========== 历史对比数据 ==========
+        hist_ctx = overview.get('historical_context', {})
+        history_text = ""
+        if hist_ctx.get('has_history'):
+            history_text = "\n## 历史对比（时序分析）\n\n"
+            
+            # 涨停趋势
+            if 'zt_trend' in hist_ctx:
+                zt = hist_ctx['zt_trend']
+                history_text += f"**涨停数量趋势**: 今日{zt['today']}只 vs 昨日{zt['yesterday']}只, "
+                history_text += f"5日均值{zt['avg_5d']:.0f}只, {zt['trend']}\n"
+                history_text += f"- 近5日数据: {zt.get('values', [])}\n\n"
+            
+            # 成交额趋势
+            if 'amount_trend' in hist_ctx:
+                amt = hist_ctx['amount_trend']
+                history_text += f"**成交额趋势**: 今日{amt['today']:.0f}亿 vs 昨日{amt['yesterday']:.0f}亿, "
+                history_text += f"5日均值{amt['avg_5d']:.0f}亿, {amt['trend']}\n"
+                history_text += f"- 近5日数据: {[f'{v:.0f}' for v in amt.get('values', [])]}\n\n"
+            
+            # 连板趋势
+            if 'continuous_trend' in hist_ctx:
+                cont = hist_ctx['continuous_trend']
+                history_text += f"**连板数量趋势**: 今日{cont['today']}只 vs 昨日{cont['yesterday']}只, "
+                history_text += f"5日均值{cont['avg_5d']:.0f}只, {cont['trend']}\n\n"
+            
+            # 炸板趋势
+            if 'zb_trend' in hist_ctx:
+                zb = hist_ctx['zb_trend']
+                history_text += f"**炸板数量趋势**: 今日{zb['today']}只 vs 昨日{zb['yesterday']}只, "
+                history_text += f"5日均值{zb['avg_5d']:.0f}只, {zb['trend']}\n\n"
         
         return f"""你是一位资深的 A 股游资情绪分析师，拥有 10 年短线交易经验。请基于今日数据，撰写一份专业的市场情绪分析报告。
 
@@ -257,7 +289,7 @@ class EmotionAnalyst(DimensionAnalyst):
 
 **高台跳水（快速下杀）**
 {dive_text if dive_text else "暂无数据"}
-
+{history_text}
 ---
 
 请撰写一份情绪分析报告，包含：
@@ -293,7 +325,7 @@ class ThemeAnalyst(DimensionAnalyst):
         if top_sectors:
             top_sectors_text = "| 板块 | 涨跌幅 | 净流入 | 涨/跌 | 领涨股 |\n"
             top_sectors_text += "|------|--------|--------|-------|--------|\n"
-            for s in top_sectors[:8]:
+            for s in top_sectors[:20]:
                 net_inflow = s.get('net_inflow', 0)
                 up_count = s.get('up_count', 0)
                 down_count = s.get('down_count', 0)
@@ -309,7 +341,7 @@ class ThemeAnalyst(DimensionAnalyst):
         if bottom_sectors:
             bottom_sectors_text = "| 板块 | 涨跌幅 | 净流入 | 涨/跌 |\n"
             bottom_sectors_text += "|------|--------|--------|-------|\n"
-            for s in bottom_sectors[:5]:
+            for s in bottom_sectors[:20]:
                 net_inflow = s.get('net_inflow', 0)
                 up_count = s.get('up_count', 0)
                 down_count = s.get('down_count', 0)
@@ -320,7 +352,7 @@ class ThemeAnalyst(DimensionAnalyst):
         top_concepts = overview.get('top_concepts', [])
         top_concepts_text = "\n".join([
             f"- {s.get('name', '')}: {s.get('change_pct', 0):+.2f}%"
-            for s in top_concepts[:8]
+            for s in top_concepts[:20]
         ]) or "暂无数据"
         
         # ========== 涨停股板块分布（增强：含具体股票名单）==========
@@ -337,11 +369,11 @@ class ThemeAnalyst(DimensionAnalyst):
             })
         
         # 按涨停数量排序
-        sorted_industries = sorted(zt_by_industry.items(), key=lambda x: -len(x[1]))[:10]
+        sorted_industries = sorted(zt_by_industry.items(), key=lambda x: -len(x[1]))[:20]
         
         zt_dist_text = ""
         for ind, stocks in sorted_industries:
-            stock_names = ', '.join([f"{s['name']}({s['continuous']}板)" for s in stocks[:5]])
+            stock_names = ', '.join([f"{s['name']}({s['continuous']}板)" for s in stocks[:20]])
             if len(stocks) > 5:
                 stock_names += f" 等{len(stocks)}只"
             zt_dist_text += f"- **{ind}** ({len(stocks)}只涨停): {stock_names}\n"
@@ -353,7 +385,7 @@ class ThemeAnalyst(DimensionAnalyst):
         if board_changes:
             board_changes_text = "| 板块 | 涨跌幅 | 主力净流入 | 异动次数 | 最活跃个股 |\n"
             board_changes_text += "|------|--------|------------|----------|------------|\n"
-            for bc in board_changes[:8]:
+            for bc in board_changes[:20]:
                 board_changes_text += (f"| {bc.get('name', '')} | {bc.get('change_pct', 0):+.2f}% | "
                                       f"{bc.get('main_net_inflow', 0):.2f}亿 | {bc.get('change_count', 0)}次 | "
                                       f"{bc.get('top_stock_name', '')} |\n")
@@ -412,6 +444,31 @@ class FundFlowAnalyst(DimensionAnalyst):
     def analyst_role(self) -> str:
         return "资金流向分析师，专注主力动向，擅长从资金角度判断市场方向"
     
+    def _build_fund_history_text(self, overview: Dict[str, Any]) -> str:
+        """构建资金历史趋势文本"""
+        hist_ctx = overview.get('historical_context', {})
+        if not hist_ctx.get('has_history'):
+            return ""
+        
+        text = "\n## 历史对比（资金趋势）\n\n"
+        
+        # 两融余额趋势
+        if 'margin_trend' in hist_ctx:
+            margin = hist_ctx['margin_trend']
+            change = margin.get('change', 0)
+            change_str = f"+{change:.0f}" if change > 0 else f"{change:.0f}"
+            text += f"**两融余额趋势**: 今日{margin['today']:.0f}亿, "
+            text += f"较昨日{change_str}亿, {margin['trend']}\n\n"
+        
+        # 机构净买入趋势
+        if 'org_buy_trend' in hist_ctx:
+            org = hist_ctx['org_buy_trend']
+            text += f"**机构净买入趋势**: 今日{org['today']:.2f}亿, "
+            text += f"昨日{org['yesterday']:.2f}亿, 近5日累计{org['sum_5d']:.2f}亿\n"
+            text += f"- {org['trend']}\n\n"
+        
+        return text
+    
     def build_prompt(self, data: Dict[str, Any]) -> str:
         overview = data.get('overview', {})
         
@@ -421,8 +478,8 @@ class FundFlowAnalyst(DimensionAnalyst):
         if lhb_stocks:
             lhb_text = "| 股票 | 涨跌幅 | 净买入 | 上榜原因 |\n"
             lhb_text += "|------|--------|--------|----------|\n"
-            for s in lhb_stocks[:10]:
-                reason = s.get('reason', '')[:20]
+            for s in lhb_stocks[:20]:
+                reason = s.get('reason', '')[:50]
                 lhb_text += f"| {s.get('name', '')} | {s.get('change_pct', 0):+.2f}% | {s.get('net_buy', 0):.2f}亿 | {reason} |\n"
         else:
             lhb_text = "暂无龙虎榜数据"
@@ -433,10 +490,10 @@ class FundFlowAnalyst(DimensionAnalyst):
         if lhb_seat_detail:
             lhb_seat_text = "| 股票 | 席位类型 | 营业部/机构 | 买入金额 | 卖出金额 | 净额 |\n"
             lhb_seat_text += "|------|----------|-------------|----------|----------|------|\n"
-            for seat in lhb_seat_detail[:15]:
+            for seat in lhb_seat_detail[:20]:
                 seat_type = "机构" if "机构" in seat.get('trader_name', '') else "游资"
                 lhb_seat_text += (f"| {seat.get('stock_name', '')} | {seat_type} | "
-                                 f"{seat.get('trader_name', '')[:15]} | {seat.get('buy_amount', 0):.2f}亿 | "
+                                 f"{seat.get('trader_name', '')[:20]} | {seat.get('buy_amount', 0):.2f}亿 | "
                                  f"{seat.get('sell_amount', 0):.2f}亿 | {seat.get('net_amount', 0):.2f}亿 |\n")
         
         # ========== 机构买卖统计（新增）==========
@@ -487,6 +544,7 @@ class FundFlowAnalyst(DimensionAnalyst):
 - 大笔卖出: {big_sell} 次
 - 买卖力量比: {buy_sell_ratio:.2f}（>1 买方占优）
 
+{self._build_fund_history_text(overview)}
 ---
 
 请撰写一份资金流向分析报告，包含：
@@ -522,7 +580,7 @@ class RiskAnalyst(DimensionAnalyst):
         if dt_pool:
             dt_text = "| 股票 | 连续跌停 | 封单资金 | 行业 |\n"
             dt_text += "|------|----------|----------|------|\n"
-            for d in dt_pool[:8]:
+            for d in dt_pool[:20]:
                 dt_text += f"| {d.get('name', '')} | {d.get('continuous', 1)}板 | {d.get('seal_amount', 0):.2f}亿 | {d.get('industry', '')} |\n"
         else:
             dt_text = "暂无跌停股"
@@ -534,7 +592,7 @@ class RiskAnalyst(DimensionAnalyst):
         if dive_list:
             dive_text = "| 时间 | 股票 | 板块 | 详情 |\n"
             dive_text += "|------|------|------|------|\n"
-            for item in dive_list[:8]:
+            for item in dive_list[:20]:
                 dive_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:25]} |\n"
         
         # ========== 大笔卖出详情（新增）==========
@@ -543,7 +601,7 @@ class RiskAnalyst(DimensionAnalyst):
         if big_sell_list:
             big_sell_text = "| 时间 | 股票 | 板块 | 详情 |\n"
             big_sell_text += "|------|------|------|------|\n"
-            for item in big_sell_list[:8]:
+            for item in big_sell_list[:20]:
                 big_sell_text += f"| {item.get('time', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:25]} |\n"
         
         # ========== 炸板股详情（新增）==========
@@ -552,13 +610,13 @@ class RiskAnalyst(DimensionAnalyst):
         if zb_pool:
             zb_text = "| 股票 | 炸板次数 | 涨跌幅 | 行业 |\n"
             zb_text += "|------|----------|--------|------|\n"
-            for zb in zb_pool[:5]:
+            for zb in zb_pool[:20]:
                 zb_text += f"| {zb.get('name', '')} | {zb.get('zb_count', 0)}次 | {zb.get('change_pct', 0):+.2f}% | {zb.get('industry', '')} |\n"
         
         # 新闻摘要
         news_text = "\n".join([
             f"- {n.title[:50] if hasattr(n, 'title') else n.get('title', '')[:50]}"
-            for n in news[:8]
+            for n in news[:10]
         ]) if news else "暂无新闻"
         
         # 计算涨跌比
@@ -639,7 +697,7 @@ class IndexAnalyst(DimensionAnalyst):
         if indices:
             indices_table = "| 指数 | 收盘 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 |\n"
             indices_table += "|------|------|--------|------|------|------|------|\n"
-            for idx in indices[:12]:
+            for idx in indices[:20]:
                 if isinstance(idx, dict):
                     name = idx.get('name', '')
                     current = idx.get('current', 0)
@@ -664,7 +722,7 @@ class IndexAnalyst(DimensionAnalyst):
         # ========== 走势形态判断辅助数据 ==========
         # 提取主要指数的走势特征
         main_indices_analysis = ""
-        for idx in indices[:3]:  # 上证、深证、创业板
+        for idx in indices[:10]:  # 上证、深证、创业板
             if isinstance(idx, dict):
                 name = idx.get('name', '')
                 current = idx.get('current', 0)
@@ -749,14 +807,14 @@ class NewsAnalyst(DimensionAnalyst):
         # 财新新闻
         caixin_news = overview.get('caixin_news', [])
         caixin_text = "\n".join([
-            f"- [{n.get('tag', '')}] {n.get('summary', '')[:80]}"
-            for n in caixin_news[:10]
+            f"- [{n.get('tag', '')}] {n.get('summary', '')[:100]}"
+            for n in caixin_news[:20]
         ]) if caixin_news else "暂无财新数据"
         
         # 搜索新闻
         news_text = "\n".join([
             f"- {n.title[:80] if hasattr(n, 'title') else n.get('title', '')[:80]}"
-            for n in news[:10]
+            for n in news[:20]
         ]) if news else "暂无搜索新闻"
         
         return f"""你是一位资深的 A 股政策分析师，专注于政策解读和消息面影响分析。请基于今日消息，撰写一份专业的消息政策分析报告。
@@ -811,7 +869,7 @@ class ZTPoolAnalyst(DimensionAnalyst):
         zt_pool_text = ""
         if zt_pool:
             zt_pool_text = "| 股票 | 连板数 | 封板资金 | 炸板次数 | 行业 |\n|------|--------|----------|----------|------|\n"
-            for zt in zt_pool[:10]:
+            for zt in zt_pool[:20]:
                 zt_pool_text += f"| {zt.get('name', '')} | {zt.get('continuous', 1)}板 | {zt.get('seal_amount', 0):.1f}亿 | {zt.get('zb_count', 0)}次 | {zt.get('industry', '')} |\n"
         
         # 昨日涨停今日表现
@@ -819,7 +877,7 @@ class ZTPoolAnalyst(DimensionAnalyst):
         previous_zt_text = ""
         if previous_zt:
             previous_zt_text = "| 股票 | 今日涨跌 | 昨日连板 | 行业 |\n|------|----------|----------|------|\n"
-            for pzt in previous_zt[:8]:
+            for pzt in previous_zt[:20]:
                 previous_zt_text += f"| {pzt.get('name', '')} | {pzt.get('change_pct', 0):+.2f}% | {pzt.get('yesterday_continuous', 1)}板 | {pzt.get('industry', '')} |\n"
         
         # 炸板股池
@@ -827,7 +885,7 @@ class ZTPoolAnalyst(DimensionAnalyst):
         zb_pool_text = ""
         if zb_pool:
             zb_pool_text = "| 股票 | 炸板次数 | 涨跌幅 | 行业 |\n|------|----------|--------|------|\n"
-            for zb in zb_pool[:5]:
+            for zb in zb_pool[:20]:
                 zb_pool_text += f"| {zb.get('name', '')} | {zb.get('zb_count', 0)}次 | {zb.get('change_pct', 0):+.2f}% | {zb.get('industry', '')} |\n"
         
         # 跌停股池
@@ -835,7 +893,7 @@ class ZTPoolAnalyst(DimensionAnalyst):
         dt_pool_text = ""
         if dt_pool:
             dt_pool_text = "| 股票 | 连续跌停 | 行业 |\n|------|----------|------|\n"
-            for dt in dt_pool[:5]:
+            for dt in dt_pool[:20]:
                 dt_pool_text += f"| {dt.get('name', '')} | {dt.get('continuous', 1)}板 | {dt.get('industry', '')} |\n"
         
         return f"""你是一位资深的 A 股涨停板生态分析师，拥有丰富的短线交易经验。请基于今日涨停板数据，撰写一份专业的涨停板生态分析报告。
@@ -935,7 +993,7 @@ class HiddenInflowAnalyst(DimensionAnalyst):
         if all_inflow_stocks:
             all_stocks_text = "| 代码 | 名称 | 大笔买入 | 关注指数 | 综合得分 | 今日涨跌 | 机构参与度 | 市值(亿) | 换手率 | 板块 |\n"
             all_stocks_text += "|------|------|----------|----------|----------|----------|------------|----------|--------|------|\n"
-            for stock in all_inflow_stocks[:25]:  # 展示前25只供分析
+            for stock in all_inflow_stocks[:40]:  # 展示前25只供分析
                 market_cap = stock.get('market_cap', 0)
                 market_cap_str = f"{market_cap:.0f}" if market_cap > 0 else "-"
                 turnover = stock.get('turnover_rate', 0)
@@ -951,7 +1009,7 @@ class HiddenInflowAnalyst(DimensionAnalyst):
         # ========== 大笔买入时间分布（判断资金流入节奏）==========
         buy_time_analysis = ""
         if all_inflow_stocks:
-            for stock in all_inflow_stocks[:5]:  # 前5只的买入时间
+            for stock in all_inflow_stocks[:20]:  # 前5只的买入时间
                 times = stock.get('big_buy_times', [])
                 if times:
                     buy_time_analysis += f"- {stock.get('name', '')}: {', '.join(times[:4])}\n"
@@ -962,7 +1020,7 @@ class HiddenInflowAnalyst(DimensionAnalyst):
         big_buy_text = ""
         if big_buy_list:
             big_buy_text = "| 时间 | 代码 | 名称 | 板块 | 详情 |\n|------|------|------|------|------|\n"
-            for item in big_buy_list[:15]:
+            for item in big_buy_list[:20]:
                 big_buy_text += f"| {item.get('time', '')} | {item.get('code', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:25]} |\n"
         
         # ========== 大笔卖出详情（对比分析）==========
@@ -970,7 +1028,7 @@ class HiddenInflowAnalyst(DimensionAnalyst):
         big_sell_text = ""
         if big_sell_list:
             big_sell_text = "| 时间 | 代码 | 名称 | 板块 | 详情 |\n|------|------|------|------|------|\n"
-            for item in big_sell_list[:8]:
+            for item in big_sell_list[:20]:
                 big_sell_text += f"| {item.get('time', '')} | {item.get('code', '')} | {item.get('name', '')} | {item.get('sector', '')} | {item.get('info', '')[:25]} |\n"
         
         # ========== 板块分布统计 ==========
@@ -1086,7 +1144,7 @@ class SectorOpportunityAnalyst(DimensionAnalyst):
         if recommended:
             recommended_text = "| 板块 | 总分 | 便宜 | 催化 | 反转 | PE | 股息率 | 推荐理由 |\n"
             recommended_text += "|------|------|------|------|------|-----|--------|----------|\n"
-            for opp in recommended[:8]:
+            for opp in recommended[:20]:
                 reasons = opp.get('cheap_reasons', [])[:1] + opp.get('catalyst_reasons', [])[:1]
                 reason_text = '; '.join(reasons)[:30] if reasons else '-'
                 recommended_text += (f"| {opp.get('sector_name', '')} | {opp.get('total_score', 0)} | "
@@ -1127,7 +1185,7 @@ class SectorOpportunityAnalyst(DimensionAnalyst):
         if reversal_list:
             reversal_text = "| 板块 | 反转得分 | 今日涨跌 | 涨停数 | 反转原因 |\n"
             reversal_text += "|------|----------|----------|--------|----------|\n"
-            for opp in reversal_list[:5]:
+            for opp in reversal_list[:20]:
                 reasons = '; '.join(opp.get('reversal_reasons', [])[:2])[:40] or '-'
                 reversal_text += (f"| {opp.get('sector_name', '')} | {opp.get('reversal_score', 0)} | "
                                  f"{opp.get('recent_5d_change', 0):+.2f}% | {opp.get('zt_count', 0)} | "
@@ -1137,7 +1195,7 @@ class SectorOpportunityAnalyst(DimensionAnalyst):
         top_sectors = overview.get('top_sectors', [])
         top_sectors_text = ""
         if top_sectors:
-            for s in top_sectors[:5]:
+            for s in top_sectors[:20]:
                 net_inflow = s.get('net_inflow', 0)
                 leader = s.get('leader_stock', '')
                 leader_text = f"（领涨:{leader}）" if leader else ""
@@ -1147,7 +1205,7 @@ class SectorOpportunityAnalyst(DimensionAnalyst):
         bottom_sectors = overview.get('bottom_sectors', [])
         bottom_sectors_text = ""
         if bottom_sectors:
-            for s in bottom_sectors[:5]:
+            for s in bottom_sectors[:20]:
                 net_inflow = s.get('net_inflow', 0)
                 bottom_sectors_text += f"- {s.get('name', '')}: {s.get('change_pct', 0):+.2f}% 净流入{net_inflow:.2f}亿\n"
         bottom_sectors_text = bottom_sectors_text or "暂无数据"
@@ -1238,7 +1296,7 @@ class CommentScoreAnalyst(DimensionAnalyst):
         if comment_top:
             comment_top_text = "| 代码 | 名称 | 综合得分 | 排名 | 排名变化 | 涨跌幅 | 换手率 | 机构参与度 | 主力成本 |\n"
             comment_top_text += "|------|------|----------|------|----------|--------|--------|------------|----------|\n"
-            for stock in comment_top[:10]:
+            for stock in comment_top[:20]:
                 rank_change = stock.get('rank_change', 0)
                 rank_change_str = f"+{rank_change}" if rank_change > 0 else str(rank_change)
                 comment_top_text += (f"| {stock.get('code', '')} | {stock.get('name', '')} | "
@@ -1253,7 +1311,7 @@ class CommentScoreAnalyst(DimensionAnalyst):
         if high_attention:
             attention_text = "| 代码 | 名称 | 关注指数 | 综合得分 | 涨跌幅 | 机构参与度 |\n"
             attention_text += "|------|------|----------|----------|--------|------------|\n"
-            for stock in high_attention[:10]:
+            for stock in high_attention[:20]:
                 attention_text += (f"| {stock.get('code', '')} | {stock.get('name', '')} | "
                                   f"{stock.get('attention', 0):.0f} | {stock.get('score', 0):.0f} | "
                                   f"{stock.get('change_pct', 0):+.2f}% | {stock.get('org_participate', 0):.1f}% |\n")
@@ -1264,7 +1322,7 @@ class CommentScoreAnalyst(DimensionAnalyst):
         if comment_bottom:
             comment_bottom_text = "| 代码 | 名称 | 综合得分 | 排名 | 排名变化 | 涨跌幅 |\n"
             comment_bottom_text += "|------|------|----------|------|----------|--------|\n"
-            for stock in comment_bottom[:5]:
+            for stock in comment_bottom[:20]:
                 rank_change = stock.get('rank_change', 0)
                 rank_change_str = f"+{rank_change}" if rank_change > 0 else str(rank_change)
                 comment_bottom_text += (f"| {stock.get('code', '')} | {stock.get('name', '')} | "
@@ -1527,7 +1585,12 @@ class MarketMapReduceAnalyzer:
                 dimension_reports.append(f"\n---\n### 【{dim_name}】\n[分析失败: {analysis.error}]\n---\n")
         
         # 构建 Reduce Prompt
-        reduce_prompt = f"""你是一位 A 股首席策略分析师，拥有 20 年市场研究经验。
+        reduce_prompt = f"""你是一位 A 股首席策略分析师，拥有 20 年市场研究经验。您擅长的事项如下：
+        1. 从政策变化中，提前捕捉后续的趋势性机会。
+        2. 从资金的变化中，能准确关注到您的同行们实际上在布局哪些方向。
+        3. 盘感极强，从各类数据中能够交叉挖掘出最有价值的信息，交易点位把握极其精准。
+        4. 深谙各种宏观->股市微观层面布局的潜规则，对各种国家政策实际要达到的目标非常理解。
+        5. 充分理解各种量化指标，对各种因子的理解远超众人。
 
 现在，你的 10 位专业分析师已经从不同维度完成了今日市场的分析报告。请仔细阅读每份报告，综合所有信息，撰写一份深度的市场复盘报告。
 
@@ -1632,6 +1695,8 @@ class MarketMapReduceAnalyzer:
 1. 够便宜（安全垫）：经历了长时间调整，机构仓位低，散户绝望，估值在历史底部
 2. 有催化（导火索）：未来3-6个月内有确定的政策预期、技术突破或产品落地
 3. 有反转（基本面）：行业供需格局改善，从"杀估值"转向"杀业绩"结束，进入业绩修复期
+
+您不仅仅是给您的客户一份建议，更重要的是，您也需要通过这个报告，来捕捉第二天的赚钱机会，为您自己的钱包负责。
 
 请直接输出完整的 Markdown 格式报告。"""
 

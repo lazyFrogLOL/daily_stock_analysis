@@ -8,6 +8,7 @@
 1. 获取大盘指数数据（上证、深证、创业板等）
 2. 获取市场涨跌统计、板块数据、资金数据等
 3. 搜索市场新闻
+4. 存储历史数据，提供时序分析维度
 
 注意：
 - 本模块只负责数据获取和存储
@@ -17,7 +18,7 @@
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 
 import akshare as ak
@@ -194,6 +195,10 @@ class MarketOverview:
     sector_catalyst_list: List[Dict] = field(default_factory=list)  # 有催化板块TOP5
     sector_reversal_list: List[Dict] = field(default_factory=list)  # 有反转信号板块TOP5
     sector_recommended: List[Dict] = field(default_factory=list)    # 推荐埋伏板块（总分>=4）
+    
+    # ========== 历史对比数据（时序分析）==========
+    
+    historical_context: Dict[str, Any] = field(default_factory=dict)  # 历史对比上下文
 
 
 class MarketAnalyzer:
@@ -256,6 +261,59 @@ class MarketAnalyzer:
         self.search_service = search_service
         self.analyzer = analyzer  # 保留兼容性，但不再使用
         
+        # ========== 日内数据缓存 ==========
+        # 避免重复调用同一接口，减少被封IP风险
+        self._cache: Dict[str, Any] = {}
+        self._cache_date: str = ""  # 缓存日期，跨日自动清空
+        
+        # ========== 历史数据管理器 ==========
+        # 用于存储和查询历史数据，提供时序分析维度
+        self._history_manager = None  # 延迟初始化
+    
+    def _get_history_manager(self):
+        """获取历史数据管理器（延迟初始化）"""
+        if self._history_manager is None:
+            try:
+                from storage import get_market_history_manager
+                self._history_manager = get_market_history_manager()
+            except Exception as e:
+                logger.warning(f"[历史数据] 初始化历史数据管理器失败: {e}")
+        return self._history_manager
+        
+    def _get_cached_data(self, cache_key: str) -> Optional[Any]:
+        """
+        获取缓存数据
+        
+        Args:
+            cache_key: 缓存键名
+            
+        Returns:
+            缓存的数据，不存在或过期返回 None
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # 跨日清空缓存
+        if self._cache_date != today:
+            self._cache.clear()
+            self._cache_date = today
+            logger.info(f"[缓存] 日期变更，清空缓存 ({today})")
+            return None
+        
+        return self._cache.get(cache_key)
+    
+    def _set_cached_data(self, cache_key: str, data: Any) -> None:
+        """
+        设置缓存数据
+        
+        Args:
+            cache_key: 缓存键名
+            data: 要缓存的数据
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        self._cache_date = today
+        self._cache[cache_key] = data
+        logger.debug(f"[缓存] 已缓存: {cache_key}")
+        
     def get_market_overview(self, target_date: Optional[str] = None) -> MarketOverview:
         """
         获取市场概览数据（增强版，支持指定日期）
@@ -310,8 +368,123 @@ class MarketAnalyzer:
             
             # 板块埋伏机会数据
             self._get_sector_opportunity_data(overview)
+            
+            # ========== 历史数据处理 ==========
+            # 1. 获取历史对比上下文
+            self._get_historical_context(overview)
+            
+            # 2. 保存今日数据到历史库
+            self._save_to_history(overview)
         
         return overview
+    
+    def _get_historical_context(self, overview: MarketOverview):
+        """
+        获取历史对比上下文
+        
+        从历史数据库获取近N天的数据，计算时序变化趋势，
+        供 LLM 分析师参考。
+        """
+        try:
+            history_manager = self._get_history_manager()
+            if history_manager is None:
+                logger.warning("[历史数据] 历史数据管理器不可用")
+                return
+            
+            # 获取历史对比上下文
+            context = history_manager.get_historical_context(days=5)
+            
+            if context.get('has_history'):
+                overview.historical_context = context
+                logger.info(f"[历史数据] 获取到 {context.get('history_days', 0)} 天历史数据")
+                
+                # 输出关键趋势信息
+                if 'zt_trend' in context:
+                    zt = context['zt_trend']
+                    logger.info(f"[历史数据] 涨停趋势: 今日{zt['today']}只, "
+                              f"昨日{zt['yesterday']}只, 5日均{zt['avg_5d']:.0f}只, {zt['trend']}")
+                
+                if 'amount_trend' in context:
+                    amt = context['amount_trend']
+                    logger.info(f"[历史数据] 成交额趋势: 今日{amt['today']:.0f}亿, "
+                              f"昨日{amt['yesterday']:.0f}亿, {amt['trend']}")
+            else:
+                logger.info("[历史数据] 历史数据不足，跳过对比分析")
+                overview.historical_context = {'has_history': False}
+                
+        except Exception as e:
+            logger.warning(f"[历史数据] 获取历史上下文失败: {e}")
+            overview.historical_context = {'has_history': False, 'error': str(e)}
+    
+    def _save_to_history(self, overview: MarketOverview):
+        """
+        保存今日数据到历史数据库
+        
+        将当日的市场数据和板块数据存入 SQLite，
+        供后续历史对比分析使用。
+        """
+        try:
+            history_manager = self._get_history_manager()
+            if history_manager is None:
+                return
+            
+            target_date = date.fromisoformat(overview.date)
+            
+            # 检查是否已有今日数据
+            if history_manager.has_today_data(target_date):
+                logger.info(f"[历史数据] {overview.date} 数据已存在，更新中...")
+            
+            # 提取指数数据
+            sh_index = sz_index = cyb_index = 0.0
+            sh_change = sz_change = cyb_change = 0.0
+            for idx in overview.indices:
+                if idx.name == '上证指数':
+                    sh_index = idx.current
+                    sh_change = idx.change_pct
+                elif idx.name == '深证成指':
+                    sz_index = idx.current
+                    sz_change = idx.change_pct
+                elif idx.name == '创业板指':
+                    cyb_index = idx.current
+                    cyb_change = idx.change_pct
+            
+            # 构建市场数据
+            market_data = {
+                'up_count': overview.up_count,
+                'down_count': overview.down_count,
+                'flat_count': overview.flat_count,
+                'limit_up_count': overview.limit_up_count,
+                'limit_down_count': overview.limit_down_count,
+                'zt_first_board': overview.zt_first_board_count,
+                'zt_continuous': overview.zt_continuous_count,
+                'zt_max_height': overview.zt_max_continuous,
+                'zb_count': overview.zb_pool_count,
+                'total_amount': overview.total_amount,
+                'avg_turnover': overview.avg_turnover_rate,
+                'margin_balance': overview.margin_balance,
+                'margin_buy': overview.margin_buy,
+                'lhb_count': len(overview.lhb_stocks),
+                'lhb_org_net_buy': overview.lhb_org_net_buy,
+                'sh_index': sh_index,
+                'sh_change_pct': sh_change,
+                'sz_index': sz_index,
+                'sz_change_pct': sz_change,
+                'cyb_index': cyb_index,
+                'cyb_change_pct': cyb_change,
+            }
+            
+            # 保存市场数据
+            history_manager.save_market_daily(market_data, target_date)
+            
+            # 保存板块数据
+            all_sectors = overview.top_sectors + overview.bottom_sectors
+            if all_sectors:
+                history_manager.save_sector_daily(all_sectors, target_date)
+            
+            logger.info(f"[历史数据] 已保存 {overview.date} 市场数据")
+            
+        except Exception as e:
+            logger.warning(f"[历史数据] 保存历史数据失败: {e}")
 
     def _call_akshare_with_retry(self, fn, name: str, attempts: int = 2):
         last_error: Optional[Exception] = None
@@ -449,8 +622,16 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取市场涨跌统计...")
             
-            # 获取全部A股实时行情
-            df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=2)
+            # 使用缓存避免重复请求
+            cache_key = "stock_zh_a_spot"
+            df = self._get_cached_data(cache_key)
+            
+            if df is None:
+                df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=2)
+                if df is not None and not df.empty:
+                    self._set_cached_data(cache_key, df)
+            else:
+                logger.info("[大盘] 使用缓存的A股实时行情数据")
             
             if df is not None and not df.empty:
                 # 涨跌统计
@@ -483,8 +664,6 @@ class MarketAnalyzer:
                 
                 # 创60日新高/新低
                 change_60d_col = '60日涨跌幅'
-                high_col = '最高'
-                low_col = '最低'
                 if change_60d_col in df.columns:
                     df[change_60d_col] = pd.to_numeric(df[change_60d_col], errors='coerce')
                     # 简化判断：60日涨幅>30%且今日创新高
@@ -516,8 +695,16 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取板块涨跌榜（同花顺）...")
             
-            # 使用同花顺行业一览表接口
-            df = self._call_akshare_with_retry(ak.stock_board_industry_summary_ths, "同花顺行业板块", attempts=2)
+            # 使用缓存避免重复请求
+            cache_key = "stock_board_industry_summary_ths"
+            df = self._get_cached_data(cache_key)
+            
+            if df is None:
+                df = self._call_akshare_with_retry(ak.stock_board_industry_summary_ths, "同花顺行业板块", attempts=2)
+                if df is not None and not df.empty:
+                    self._set_cached_data(cache_key, df)
+            else:
+                logger.info("[大盘] 使用缓存的同花顺行业板块数据")
             
             if df is not None and not df.empty:
                 change_col = '涨跌幅'
@@ -576,6 +763,19 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取概念板块热点（同花顺）...")
             
+            # 先检查数据库是否有今日数据
+            target_date = date.fromisoformat(overview.date)
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_concept_data(target_date):
+                cached_data = history_manager.get_concept_daily(target_date)
+                if cached_data:
+                    logger.info(f"[大盘] 使用缓存的概念板块数据 ({len(cached_data)}条)")
+                    # 按涨跌幅排序
+                    cached_data.sort(key=lambda x: x.get('change_pct', 0), reverse=True)
+                    overview.top_concepts = cached_data[:10]
+                    overview.bottom_concepts = cached_data[-10:][::-1]
+                    return
+            
             # 1. 获取概念名称列表
             name_df = self._call_akshare_with_retry(ak.stock_board_concept_name_ths, "同花顺概念名称", attempts=2)
             
@@ -632,6 +832,10 @@ class MarketAnalyzer:
             # 跌幅前5
             overview.bottom_concepts = concept_data[-10:][::-1]  # 倒序取最后5个
             
+            # 保存到数据库
+            if history_manager:
+                history_manager.save_concept_daily(concept_data, target_date)
+            
             logger.info(f"[大盘] 热门概念: {[s['name'] for s in overview.top_concepts]}")
                     
         except Exception as e:
@@ -641,6 +845,18 @@ class MarketAnalyzer:
         """获取融资融券数据"""
         try:
             logger.info("[大盘] 获取融资融券数据...")
+            
+            # 先检查数据库是否有数据
+            query_date = date.fromisoformat(target_date) if target_date else date.fromisoformat(overview.date)
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_margin_data(query_date):
+                cached_data = history_manager.get_margin_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的融资融券数据")
+                    overview.margin_balance = cached_data.get('margin_balance', 0) or 0
+                    overview.margin_buy = cached_data.get('margin_buy', 0) or 0
+                    overview.short_balance = cached_data.get('short_balance', 0) or 0
+                    return
             
             # 获取两融账户信息
             df = self._call_akshare_with_retry(ak.stock_margin_account_info, "融资融券", attempts=2)
@@ -669,6 +885,14 @@ class MarketAnalyzer:
                 if '融券余额' in df.columns:
                     overview.short_balance = float(latest.get('融券余额', 0) or 0)
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_margin_daily({
+                        'margin_balance': overview.margin_balance,
+                        'margin_buy': overview.margin_buy,
+                        'short_balance': overview.short_balance,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 融资余额: {overview.margin_balance:.0f}亿 "
                           f"融资买入: {overview.margin_buy:.2f}亿 融券余额: {overview.short_balance:.2f}亿")
                 
@@ -690,6 +914,22 @@ class MarketAnalyzer:
                 base_date = datetime.strptime(target_date, '%Y-%m-%d')
             else:
                 base_date = datetime.now()
+            
+            query_date = base_date.date() if hasattr(base_date, 'date') else date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_lhb_data(query_date):
+                cached_data = history_manager.get_lhb_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的龙虎榜数据")
+                    overview.lhb_stocks = cached_data.get('stocks', [])
+                    overview.lhb_net_buy = cached_data.get('lhb_net_buy', 0) or 0
+                    overview.lhb_org_buy_count = cached_data.get('org_buy_count', 0) or 0
+                    overview.lhb_org_sell_count = cached_data.get('org_sell_count', 0) or 0
+                    overview.lhb_org_net_buy = cached_data.get('org_net_buy', 0) or 0
+                    overview.lhb_seat_detail = cached_data.get('seat_detail', [])
+                    return
             
             df = None
             actual_date = None
@@ -736,6 +976,18 @@ class MarketAnalyzer:
                 
                 # ========== 获取龙虎榜席位明细（新增）==========
                 self._get_lhb_seat_detail(overview, df, date_str)
+                
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_lhb_daily({
+                        'lhb_count': len(df),
+                        'lhb_net_buy': overview.lhb_net_buy,
+                        'org_buy_count': overview.lhb_org_buy_count,
+                        'org_sell_count': overview.lhb_org_sell_count,
+                        'org_net_buy': overview.lhb_org_net_buy,
+                        'stocks': overview.lhb_stocks,
+                        'seat_detail': overview.lhb_seat_detail,
+                    }, query_date)
                 
             else:
                 logger.warning("[大盘] 未能获取到龙虎榜数据")
@@ -866,6 +1118,18 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取大宗交易数据...")
             
+            # 先检查数据库是否有数据
+            query_date = date.fromisoformat(overview.date)
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_block_trade_data(query_date):
+                cached_data = history_manager.get_block_trade_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的大宗交易数据")
+                    overview.block_trade_amount = cached_data.get('amount', 0) or 0
+                    overview.block_trade_premium_ratio = cached_data.get('premium_ratio', 0) or 0
+                    overview.block_trade_discount_ratio = cached_data.get('discount_ratio', 0) or 0
+                    return
+            
             # 获取大宗交易市场统计
             df = self._call_akshare_with_retry(ak.stock_dzjy_sctj, "大宗交易", attempts=2)
             
@@ -882,6 +1146,14 @@ class MarketAnalyzer:
                 # 折价成交占比
                 if '折价成交总额占比' in df.columns:
                     overview.block_trade_discount_ratio = float(latest.get('折价成交总额占比', 0) or 0)
+                
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_block_trade_daily({
+                        'amount': overview.block_trade_amount,
+                        'premium_ratio': overview.block_trade_premium_ratio,
+                        'discount_ratio': overview.block_trade_discount_ratio,
+                    }, query_date)
                 
                 logger.info(f"[大盘] 大宗交易: {overview.block_trade_amount:.2f}亿 "
                           f"溢价占比:{overview.block_trade_premium_ratio:.1f}% "
@@ -1035,11 +1307,36 @@ class MarketAnalyzer:
             logger.info("[大盘] 获取涨停股池数据...")
             
             date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            query_date = date.fromisoformat(overview.date)
             
-            df = self._call_akshare_with_retry(
-                lambda: ak.stock_zt_pool_em(date=date_str),
-                "涨停股池", attempts=2
-            )
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_zt_pool_data(query_date):
+                cached_data = history_manager.get_zt_pool_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的涨停股池数据")
+                    overview.zt_pool_count = cached_data.get('zt_count', 0) or 0
+                    overview.zt_total_amount = cached_data.get('total_amount', 0) or 0
+                    overview.zt_avg_turnover = cached_data.get('avg_turnover', 0) or 0
+                    overview.zt_first_board_count = cached_data.get('first_board_count', 0) or 0
+                    overview.zt_continuous_count = cached_data.get('continuous_count', 0) or 0
+                    overview.zt_max_continuous = cached_data.get('max_continuous', 0) or 0
+                    overview.zt_pool = cached_data.get('stocks', [])
+                    return
+            
+            # 使用缓存避免重复请求
+            cache_key = f"stock_zt_pool_em_{date_str}"
+            df = self._get_cached_data(cache_key)
+            
+            if df is None:
+                df = self._call_akshare_with_retry(
+                    lambda: ak.stock_zt_pool_em(date=date_str),
+                    "涨停股池", attempts=2
+                )
+                if df is not None and not df.empty:
+                    self._set_cached_data(cache_key, df)
+            else:
+                logger.info("[大盘] 使用内存缓存的涨停股池数据")
             
             if df is not None and not df.empty:
                 overview.zt_pool_count = len(df)
@@ -1077,6 +1374,18 @@ class MarketAnalyzer:
                         'zt_stat': str(row.get('涨停统计', '')),
                     })
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_zt_pool_daily({
+                        'zt_count': overview.zt_pool_count,
+                        'total_amount': overview.zt_total_amount,
+                        'avg_turnover': overview.zt_avg_turnover,
+                        'first_board_count': overview.zt_first_board_count,
+                        'continuous_count': overview.zt_continuous_count,
+                        'max_continuous': overview.zt_max_continuous,
+                        'stocks': overview.zt_pool,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 涨停股池: {overview.zt_pool_count}只, 首板{overview.zt_first_board_count}只, "
                            f"连板{overview.zt_continuous_count}只, 最高{overview.zt_max_continuous}板")
                 
@@ -1096,6 +1405,20 @@ class MarketAnalyzer:
             logger.info("[大盘] 获取昨日涨停股池数据...")
             
             date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            query_date = date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_previous_zt_pool_data(query_date):
+                cached_data = history_manager.get_previous_zt_pool_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的昨日涨停股池数据")
+                    overview.previous_zt_count = cached_data.get('count', 0) or 0
+                    overview.previous_zt_avg_change = cached_data.get('avg_change', 0) or 0
+                    overview.previous_zt_up_count = cached_data.get('up_count', 0) or 0
+                    overview.previous_zt_down_count = cached_data.get('down_count', 0) or 0
+                    overview.previous_zt_pool = cached_data.get('stocks', [])
+                    return
             
             df = self._call_akshare_with_retry(
                 lambda: ak.stock_zt_pool_previous_em(date=date_str),
@@ -1125,6 +1448,16 @@ class MarketAnalyzer:
                         'industry': str(row.get('所属行业', '')),
                     })
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_previous_zt_pool_daily({
+                        'count': overview.previous_zt_count,
+                        'avg_change': overview.previous_zt_avg_change,
+                        'up_count': overview.previous_zt_up_count,
+                        'down_count': overview.previous_zt_down_count,
+                        'stocks': overview.previous_zt_pool,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 昨日涨停: {overview.previous_zt_count}只, "
                            f"今日平均涨跌{overview.previous_zt_avg_change:.2f}%(溢价率), "
                            f"上涨{overview.previous_zt_up_count}只 下跌{overview.previous_zt_down_count}只")
@@ -1145,6 +1478,19 @@ class MarketAnalyzer:
             logger.info("[大盘] 获取强势股池数据...")
             
             date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            query_date = date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_strong_pool_data(query_date):
+                cached_data = history_manager.get_strong_pool_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的强势股池数据")
+                    overview.strong_pool_count = cached_data.get('count', 0) or 0
+                    overview.strong_new_high_count = cached_data.get('new_high_count', 0) or 0
+                    overview.strong_multi_zt_count = cached_data.get('multi_zt_count', 0) or 0
+                    overview.strong_pool = cached_data.get('stocks', [])
+                    return
             
             df = self._call_akshare_with_retry(
                 lambda: ak.stock_zt_pool_strong_em(date=date_str),
@@ -1176,6 +1522,15 @@ class MarketAnalyzer:
                         'industry': str(row.get('所属行业', '')),
                     })
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_strong_pool_daily({
+                        'count': overview.strong_pool_count,
+                        'new_high_count': overview.strong_new_high_count,
+                        'multi_zt_count': overview.strong_multi_zt_count,
+                        'stocks': overview.strong_pool,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 强势股池: {overview.strong_pool_count}只, "
                            f"60日新高{overview.strong_new_high_count}只, 多次涨停{overview.strong_multi_zt_count}只")
                 
@@ -1195,6 +1550,19 @@ class MarketAnalyzer:
             logger.info("[大盘] 获取炸板股池数据...")
             
             date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            query_date = date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_zb_pool_data(query_date):
+                cached_data = history_manager.get_zb_pool_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的炸板股池数据")
+                    overview.zb_pool_count = cached_data.get('zb_count', 0) or 0
+                    overview.zb_total_count = cached_data.get('total_zb_times', 0) or 0
+                    overview.zb_rate = cached_data.get('zb_rate', 0) or 0
+                    overview.zb_pool = cached_data.get('stocks', [])
+                    return
             
             df = self._call_akshare_with_retry(
                 lambda: ak.stock_zt_pool_zbgc_em(date=date_str),
@@ -1226,6 +1594,15 @@ class MarketAnalyzer:
                         'industry': str(row.get('所属行业', '')),
                     })
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_zb_pool_daily({
+                        'zb_count': overview.zb_pool_count,
+                        'total_zb_times': overview.zb_total_count,
+                        'zb_rate': overview.zb_rate,
+                        'stocks': overview.zb_pool,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 炸板股池: {overview.zb_pool_count}只, 炸板{overview.zb_total_count}次, "
                            f"炸板率{overview.zb_rate:.1f}%")
                 
@@ -1245,6 +1622,18 @@ class MarketAnalyzer:
             logger.info("[大盘] 获取跌停股池数据...")
             
             date_str = target_date.replace('-', '') if target_date else datetime.now().strftime('%Y%m%d')
+            query_date = date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_dt_pool_data(query_date):
+                cached_data = history_manager.get_dt_pool_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的跌停股池数据")
+                    overview.dt_pool_count = cached_data.get('dt_count', 0) or 0
+                    overview.dt_continuous_count = cached_data.get('continuous_count', 0) or 0
+                    overview.dt_pool = cached_data.get('stocks', [])
+                    return
             
             df = self._call_akshare_with_retry(
                 lambda: ak.stock_zt_pool_dtgc_em(date=date_str),
@@ -1272,6 +1661,14 @@ class MarketAnalyzer:
                         'industry': str(row.get('所属行业', '')),
                     })
                 
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_dt_pool_daily({
+                        'dt_count': overview.dt_pool_count,
+                        'continuous_count': overview.dt_continuous_count,
+                        'stocks': overview.dt_pool,
+                    }, query_date)
+                
                 logger.info(f"[大盘] 跌停股池: {overview.dt_pool_count}只, 连续跌停{overview.dt_continuous_count}只")
                 
         except Exception as e:
@@ -1291,7 +1688,32 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取千股千评数据...")
             
-            df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+            query_date = date.fromisoformat(overview.date)
+            
+            # 先检查数据库是否有数据
+            history_manager = self._get_history_manager()
+            if history_manager and history_manager.has_comment_data(query_date):
+                cached_data = history_manager.get_comment_daily(query_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的千股千评数据")
+                    overview.comment_avg_score = cached_data.get('avg_score', 0) or 0
+                    overview.comment_high_score_count = cached_data.get('high_score_count', 0) or 0
+                    overview.comment_low_score_count = cached_data.get('low_score_count', 0) or 0
+                    overview.comment_top_stocks = cached_data.get('top_stocks', [])
+                    overview.comment_bottom_stocks = cached_data.get('bottom_stocks', [])
+                    overview.comment_high_attention = cached_data.get('high_attention', [])
+                    return
+            
+            # 使用缓存避免重复请求
+            cache_key = "stock_comment_em"
+            df = self._get_cached_data(cache_key)
+            
+            if df is None:
+                df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+                if df is not None and not df.empty:
+                    self._set_cached_data(cache_key, df)
+            else:
+                logger.info("[大盘] 使用内存缓存的千股千评数据")
             
             if df is not None and not df.empty:
                 # 计算市场平均得分
@@ -1341,6 +1763,17 @@ class MarketAnalyzer:
                             'change_pct': float(row.get('涨跌幅', 0) or 0),
                             'org_participate': float(row.get('机构参与度', 0) or 0),
                         })
+                
+                # 保存到数据库
+                if history_manager:
+                    history_manager.save_comment_daily({
+                        'avg_score': overview.comment_avg_score,
+                        'high_score_count': overview.comment_high_score_count,
+                        'low_score_count': overview.comment_low_score_count,
+                        'top_stocks': overview.comment_top_stocks,
+                        'bottom_stocks': overview.comment_bottom_stocks,
+                        'high_attention': overview.comment_high_attention,
+                    }, query_date)
                 
                 logger.info(f"[大盘] 千股千评: 平均得分{overview.comment_avg_score:.1f}, "
                            f"高分(>=80){overview.comment_high_score_count}只, "
@@ -1452,8 +1885,16 @@ class MarketAnalyzer:
             
             logger.info(f"[大盘] 大笔买入股票: {len(big_buy_stocks)}只")
             
-            # 2. 获取千股千评数据（用于关注指数和综合得分）
-            comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+            # 2. 获取千股千评数据（用于关注指数和综合得分）- 使用缓存
+            cache_key = "stock_comment_em"
+            comment_df = self._get_cached_data(cache_key)
+            
+            if comment_df is None:
+                comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+                if comment_df is not None and not comment_df.empty:
+                    self._set_cached_data(cache_key, comment_df)
+            else:
+                logger.info("[大盘] 使用缓存的千股千评数据")
             
             # 计算市场平均关注指数（供 LLM 参考）
             avg_attention = 50.0
@@ -1497,10 +1938,19 @@ class MarketAnalyzer:
             # 4. 按大笔买入次数排序（次数多的排前面，供 LLM 优先分析）
             all_stocks.sort(key=lambda x: x['big_buy_count'], reverse=True)
             
-            # 5. 获取补充信息（行业、市值等）
+            # 5. 获取补充信息（行业、市值等）- 使用缓存
             if all_stocks:
                 try:
-                    spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
+                    cache_key = "stock_zh_a_spot"
+                    spot_df = self._get_cached_data(cache_key)
+                    
+                    if spot_df is None:
+                        spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
+                        if spot_df is not None and not spot_df.empty:
+                            self._set_cached_data(cache_key, spot_df)
+                    else:
+                        logger.info("[大盘] 使用缓存的A股实时行情数据")
+                    
                     if spot_df is not None and not spot_df.empty:
                         for stock in all_stocks:
                             stock_spot = spot_df[spot_df['代码'] == stock['code']]
@@ -1538,10 +1988,11 @@ class MarketAnalyzer:
         try:
             logger.info("[大盘] 获取板块埋伏机会数据...")
             
-            # 创建板块机会分析器（不传入 analyzer，只获取数据不做 AI 分析）
+            # 创建板块机会分析器（传入共享缓存，避免重复请求）
             opportunity_analyzer = SectorOpportunityAnalyzer(
                 search_service=self.search_service,
-                analyzer=None  # 不需要 AI 分析，数据会传给 llm_mapreduce
+                analyzer=None,  # 不需要 AI 分析，数据会传给 llm_mapreduce
+                shared_cache=self._cache  # 共享缓存
             )
             
             # 获取板块机会数据（快速模式，不分析筹码以节省时间）
@@ -1986,19 +2437,22 @@ class SectorOpportunityAnalyzer:
         '美容护理': ['国货美妆', '消费复苏'],
     }
     
-    def __init__(self, search_service: Optional[SearchService] = None, analyzer=None):
+    def __init__(self, search_service: Optional[SearchService] = None, analyzer=None,
+                 shared_cache: Optional[Dict[str, Any]] = None):
         """
         初始化板块机会分析器
         
         Args:
             search_service: 搜索服务实例（用于搜索催化剂新闻）
             analyzer: AI分析器实例（用于调用LLM生成深度分析）
+            shared_cache: 共享缓存字典（可从 MarketAnalyzer 传入，避免重复请求）
         """
         self.search_service = search_service
         self.analyzer = analyzer
         self._sw_info_cache: Optional[pd.DataFrame] = None
         self._industry_hist_cache: Dict[str, pd.DataFrame] = {}
         self._ths_industry_cache: Optional[pd.DataFrame] = None  # 同花顺行业板块缓存
+        self._shared_cache = shared_cache or {}  # 共享缓存
         
     def _call_akshare_with_retry(self, fn, name: str, attempts: int = 2):
         """带重试的akshare调用"""
@@ -2030,7 +2484,15 @@ class SectorOpportunityAnalyzer:
         Returns:
             同花顺行业板块 DataFrame
         """
+        # 优先使用本地缓存
         if self._ths_industry_cache is not None:
+            return self._ths_industry_cache
+        
+        # 其次检查共享缓存
+        cache_key = "stock_board_industry_summary_ths"
+        if cache_key in self._shared_cache:
+            self._ths_industry_cache = self._shared_cache[cache_key]
+            logger.info("[板块机会] 使用共享缓存的同花顺行业板块数据")
             return self._ths_industry_cache
         
         try:
@@ -2038,6 +2500,8 @@ class SectorOpportunityAnalyzer:
             df = self._call_akshare_with_retry(ak.stock_board_industry_summary_ths, "同花顺行业板块")
             if df is not None and not df.empty:
                 self._ths_industry_cache = df
+                # 同时更新共享缓存
+                self._shared_cache[cache_key] = df
                 logger.info(f"[板块机会] 获取到 {len(df)} 个同花顺行业板块")
             return df
         except Exception as e:
@@ -2314,10 +2778,20 @@ class SectorOpportunityAnalyzer:
         industry_zt_count: Dict[str, int] = {}
         
         try:
-            df = self._call_akshare_with_retry(
-                lambda: ak.stock_zt_pool_em(date=date),
-                "涨停股池"
-            )
+            # 使用共享缓存
+            cache_key = f"stock_zt_pool_em_{date}"
+            df = self._shared_cache.get(cache_key)
+            
+            if df is None:
+                df = self._call_akshare_with_retry(
+                    lambda: ak.stock_zt_pool_em(date=date),
+                    "涨停股池"
+                )
+                if df is not None and not df.empty:
+                    self._shared_cache[cache_key] = df
+            else:
+                logger.info("[板块机会] 使用共享缓存的涨停股池数据")
+            
             if df is not None and not df.empty and '所属行业' in df.columns:
                 industry_zt_count = df['所属行业'].value_counts().to_dict()
                 logger.info(f"[板块机会] 涨停股池: {len(df)} 只，涉及 {len(industry_zt_count)} 个行业")
