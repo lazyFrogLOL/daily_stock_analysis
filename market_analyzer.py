@@ -18,7 +18,7 @@
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List
 
 import akshare as ak
@@ -187,6 +187,14 @@ class MarketOverview:
     hidden_inflow_stocks: List[Dict] = field(default_factory=list)  # 资金流入但热度低的股票
     hidden_inflow_analysis: str = ""    # AI分析结论
     
+    # ========== 新增：价值潜力股数据 ==========
+    
+    # 低热度高质量股票（被市场忽视的优质标的）
+    low_heat_high_quality_stocks: List[Dict] = field(default_factory=list)
+    
+    # 机构悄悄建仓股票（龙虎榜有机构买入但涨幅不大）
+    institutional_accumulation_stocks: List[Dict] = field(default_factory=list)
+    
     # ========== 板块埋伏机会数据 ==========
     
     # 申万行业估值数据
@@ -197,6 +205,23 @@ class MarketOverview:
     sector_recommended: List[Dict] = field(default_factory=list)    # 推荐埋伏板块（总分>=4）
     
     # ========== 历史对比数据（时序分析）==========
+    
+    # ========== 新增：增强版历史分析数据 ==========
+    
+    # 指数技术面分析
+    index_technical: Dict[str, Any] = field(default_factory=dict)  # 指数技术面数据
+    
+    # 情绪周期分析
+    sentiment_cycle: Dict[str, Any] = field(default_factory=dict)  # 情绪周期数据
+    
+    # 板块轮动分析
+    sector_rotation: Dict[str, Any] = field(default_factory=dict)  # 板块轮动数据
+    
+    # 资金面分析
+    capital_flow: Dict[str, Any] = field(default_factory=dict)  # 资金面数据
+    
+    # 增强版历史上下文
+    enhanced_historical_context: Dict[str, Any] = field(default_factory=dict)
     
     historical_context: Dict[str, Any] = field(default_factory=dict)  # 历史对比上下文
 
@@ -249,6 +274,25 @@ class MarketAnalyzer:
         'sz399377': '小盘价值'
     }
     
+    # ========== 缓存策略配置 ==========
+    # 稳定数据：日内变化小，可以在盘中缓存
+    STABLE_CACHE_KEYS = {
+        'stock_board_industry_summary_ths',  # 行业板块数据，变化较慢
+        'stock_comment_em',                   # 千股千评，更新频率低
+    }
+    
+    # 收盘后可缓存的数据：盘中实时变化，收盘后固定
+    POST_MARKET_CACHE_KEYS = {
+        'stock_zh_a_spot',                    # A股实时行情
+        'stock_zh_index_spot_sina',           # 指数实时行情
+    }
+    
+    # A股交易时间配置
+    MARKET_OPEN_HOUR = 9
+    MARKET_OPEN_MINUTE = 30
+    MARKET_CLOSE_HOUR = 15
+    MARKET_CLOSE_MINUTE = 0
+    
     def __init__(self, search_service: Optional[SearchService] = None, analyzer=None):
         """
         初始化大盘数据获取器
@@ -279,16 +323,75 @@ class MarketAnalyzer:
             except Exception as e:
                 logger.warning(f"[历史数据] 初始化历史数据管理器失败: {e}")
         return self._history_manager
-        
-    def _get_cached_data(self, cache_key: str) -> Optional[Any]:
+    
+    def _is_market_closed(self) -> bool:
         """
-        获取缓存数据
+        判断当前是否为收盘后
+        
+        Returns:
+            True: 收盘后（15:00后）或非交易日
+            False: 盘中（9:30-15:00）
+        """
+        now = datetime.now()
+        
+        # 周末视为收盘后
+        if now.weekday() >= 5:
+            return True
+        
+        # 15:00后视为收盘后
+        if now.hour > self.MARKET_CLOSE_HOUR:
+            return True
+        if now.hour == self.MARKET_CLOSE_HOUR and now.minute >= self.MARKET_CLOSE_MINUTE:
+            return True
+        
+        # 9:30前视为收盘后（使用昨日数据）
+        if now.hour < self.MARKET_OPEN_HOUR:
+            return True
+        if now.hour == self.MARKET_OPEN_HOUR and now.minute < self.MARKET_OPEN_MINUTE:
+            return True
+        
+        return False
+    
+    def _should_use_cache(self, cache_key: str) -> bool:
+        """
+        判断是否应该使用缓存（时间感知）
+        
+        缓存策略：
+        1. 收盘后（15:00后）：所有数据都可以缓存
+        2. 盘中（9:30-15:00）：只缓存稳定数据（板块、千股千评等）
+        3. 实时数据（行情）：盘中不缓存，收盘后可缓存
         
         Args:
             cache_key: 缓存键名
             
         Returns:
-            缓存的数据，不存在或过期返回 None
+            是否应该使用缓存
+        """
+        # 收盘后，所有数据都可以缓存
+        if self._is_market_closed():
+            return True
+        
+        # 盘中，只有稳定数据可以缓存
+        if cache_key in self.STABLE_CACHE_KEYS:
+            return True
+        
+        # 盘中，实时数据不缓存
+        if cache_key in self.POST_MARKET_CACHE_KEYS:
+            logger.debug(f"[缓存] 盘中不缓存实时数据: {cache_key}")
+            return False
+        
+        # 其他数据默认可以缓存（如涨停股池等，盘中变化不大）
+        return True
+        
+    def _get_cached_data(self, cache_key: str) -> Optional[Any]:
+        """
+        获取缓存数据（时间感知版本）
+        
+        Args:
+            cache_key: 缓存键名
+            
+        Returns:
+            缓存的数据，不存在或过期或不应缓存时返回 None
         """
         today = datetime.now().strftime('%Y-%m-%d')
         
@@ -299,20 +402,33 @@ class MarketAnalyzer:
             logger.info(f"[缓存] 日期变更，清空缓存 ({today})")
             return None
         
+        # 检查是否应该使用缓存
+        if not self._should_use_cache(cache_key):
+            return None
+        
         return self._cache.get(cache_key)
     
     def _set_cached_data(self, cache_key: str, data: Any) -> None:
         """
-        设置缓存数据
+        设置缓存数据（时间感知版本）
+        
+        只有在应该缓存的情况下才会存储数据
         
         Args:
             cache_key: 缓存键名
             data: 要缓存的数据
         """
+        # 检查是否应该缓存
+        if not self._should_use_cache(cache_key):
+            logger.debug(f"[缓存] 跳过缓存（盘中实时数据）: {cache_key}")
+            return
+        
         today = datetime.now().strftime('%Y-%m-%d')
         self._cache_date = today
         self._cache[cache_key] = data
-        logger.debug(f"[缓存] 已缓存: {cache_key}")
+        
+        market_status = "收盘后" if self._is_market_closed() else "盘中"
+        logger.debug(f"[缓存] 已缓存 ({market_status}): {cache_key}")
         
     def get_market_overview(self, target_date: Optional[str] = None) -> MarketOverview:
         """
@@ -366,14 +482,37 @@ class MarketAnalyzer:
             overview.hidden_inflow_stocks = self._find_hidden_inflow_stocks(overview)
             # 注意：LLM 分析已移至 llm_mapreduce.py，这里只获取数据
             
+            # ========== 新增：价值潜力股数据 ==========
+            # 低热度高质量股票（被市场忽视的优质标的）
+            overview.low_heat_high_quality_stocks = self._find_low_heat_high_quality_stocks(overview)
+            
+            # 机构悄悄建仓股票（龙虎榜有机构买入但涨幅不大）
+            overview.institutional_accumulation_stocks = self._find_institutional_accumulation_stocks(overview)
+            
             # 板块埋伏机会数据
             self._get_sector_opportunity_data(overview)
+            
+            # ========== 新增：增强版历史分析 ==========
+            # 1. 获取指数技术面数据
+            self._get_index_technical_data(overview)
+            
+            # 2. 获取情绪周期数据
+            self._get_sentiment_cycle_data(overview)
+            
+            # 3. 获取板块轮动数据
+            self._get_sector_rotation_data(overview)
+            
+            # 4. 获取资金面数据
+            self._get_capital_flow_data(overview)
             
             # ========== 历史数据处理 ==========
             # 1. 获取历史对比上下文
             self._get_historical_context(overview)
             
-            # 2. 保存今日数据到历史库
+            # 2. 获取增强版历史上下文
+            self._get_enhanced_historical_context(overview)
+            
+            # 3. 保存今日数据到历史库
             self._save_to_history(overview)
         
         return overview
@@ -1971,6 +2110,282 @@ class MarketAnalyzer:
             logger.warning(f"[大盘] 获取资金流入股票数据失败: {e}")
             return []
 
+    def _find_low_heat_high_quality_stocks(self, overview: MarketOverview) -> List[Dict]:
+        """
+        筛选低热度高质量股票（被市场忽视的优质标的）
+        
+        筛选条件（适当放宽）：
+        1. 关注指数 < 市场平均的 90%（低热度）
+        2. 综合得分 >= 55（质量尚可）
+        3. 机构参与度 >= 3%（有机构关注）
+        4. 今日涨幅 < 5%（还没被大幅拉升）
+        5. 非ST股票
+        
+        Returns:
+            低热度高质量股票列表
+        """
+        potential_stocks = []
+        
+        try:
+            logger.info("[大盘] 筛选低热度高质量股票...")
+            
+            # 获取千股千评数据
+            cache_key = "stock_comment_em"
+            comment_df = self._get_cached_data(cache_key)
+            
+            if comment_df is None:
+                comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=2)
+                if comment_df is not None and not comment_df.empty:
+                    self._set_cached_data(cache_key, comment_df)
+            
+            if comment_df is None or comment_df.empty:
+                logger.warning("[大盘] 千股千评数据为空，无法筛选低热度高质量股票")
+                return []
+            
+            # 数据类型转换
+            comment_df['关注指数'] = pd.to_numeric(comment_df['关注指数'], errors='coerce')
+            comment_df['综合得分'] = pd.to_numeric(comment_df['综合得分'], errors='coerce')
+            comment_df['机构参与度'] = pd.to_numeric(comment_df['机构参与度'], errors='coerce')
+            comment_df['涨跌幅'] = pd.to_numeric(comment_df['涨跌幅'], errors='coerce')
+            
+            # 计算市场平均关注指数
+            avg_attention = comment_df['关注指数'].mean()
+            attention_threshold = avg_attention * 0.9  # 低于平均的90%
+            
+            logger.info(f"[大盘] 市场平均关注指数: {avg_attention:.1f}, 筛选阈值: {attention_threshold:.1f}")
+            
+            # 筛选条件
+            filtered_df = comment_df[
+                (comment_df['关注指数'] < attention_threshold) &  # 低热度
+                (comment_df['综合得分'] >= 55) &  # 质量尚可
+                (comment_df['机构参与度'] >= 3) &  # 有机构关注
+                (comment_df['涨跌幅'] < 5) &  # 还没被大幅拉升
+                (~comment_df['名称'].str.contains('ST', na=False))  # 非ST
+            ].copy()
+            
+            # 按综合得分排序
+            filtered_df = filtered_df.sort_values('综合得分', ascending=False)
+            
+            # 获取补充信息（行业、市值等）
+            cache_key_spot = "stock_zh_a_spot"
+            spot_df = self._get_cached_data(cache_key_spot)
+            
+            if spot_df is None:
+                spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
+                if spot_df is not None and not spot_df.empty:
+                    self._set_cached_data(cache_key_spot, spot_df)
+            
+            # 构建结果列表
+            for _, row in filtered_df.head(25).iterrows():
+                stock_data = {
+                    'code': str(row.get('代码', '')),
+                    'name': str(row.get('名称', '')),
+                    'attention': float(row.get('关注指数', 0) or 0),
+                    'avg_attention': avg_attention,
+                    'attention_ratio': float(row.get('关注指数', 0) or 0) / avg_attention if avg_attention > 0 else 0,
+                    'score': float(row.get('综合得分', 0) or 0),
+                    'change_pct': float(row.get('涨跌幅', 0) or 0),
+                    'rank': int(row.get('目前排名', 0) or 0),
+                    'org_participate': float(row.get('机构参与度', 0) or 0),
+                    'main_cost': float(row.get('主力成本', 0) or 0),
+                    'industry': '',
+                    'market_cap': 0.0,
+                    'turnover_rate': 0.0,
+                }
+                
+                # 补充行业和市值信息
+                if spot_df is not None and not spot_df.empty:
+                    stock_spot = spot_df[spot_df['代码'] == stock_data['code']]
+                    if not stock_spot.empty:
+                        spot_row = stock_spot.iloc[0]
+                        stock_data['industry'] = str(spot_row.get('所属行业', ''))
+                        stock_data['market_cap'] = float(spot_row.get('总市值', 0) or 0) / 1e8
+                        stock_data['turnover_rate'] = float(spot_row.get('换手率', 0) or 0)
+                
+                potential_stocks.append(stock_data)
+            
+            logger.info(f"[大盘] 筛选出 {len(potential_stocks)} 只低热度高质量股票")
+            
+            return potential_stocks
+            
+        except Exception as e:
+            logger.warning(f"[大盘] 筛选低热度高质量股票失败: {e}")
+            return []
+
+    def _find_institutional_accumulation_stocks(self, overview: MarketOverview) -> List[Dict]:
+        """
+        识别机构悄悄建仓的股票
+        
+        特征（适当放宽）：
+        1. 近期龙虎榜有机构买入（机构净买入 > 0）
+        2. 股价涨幅不大（今日涨幅 < 6%，说明还在建仓期）
+        3. 关注指数不高（< 市场平均，散户还没跟进）
+        4. 非涨停股（排除已经爆发的）
+        
+        Returns:
+            机构悄悄建仓股票列表
+        """
+        accumulation_stocks = []
+        
+        try:
+            logger.info("[大盘] 识别机构悄悄建仓股票...")
+            
+            # 从龙虎榜数据中筛选有机构买入的股票
+            lhb_stocks = overview.lhb_stocks
+            lhb_seat_detail = overview.lhb_seat_detail
+            
+            if not lhb_stocks and not lhb_seat_detail:
+                logger.info("[大盘] 无龙虎榜数据，跳过机构建仓识别")
+                return []
+            
+            # 统计每只股票的机构买入情况
+            org_buy_stocks: Dict[str, Dict] = {}  # {code: {name, org_buy, org_sell, net_buy, ...}}
+            
+            # 从席位明细中提取机构买入信息
+            for seat in lhb_seat_detail:
+                trader_name = seat.get('trader_name', '')
+                # 判断是否为机构席位
+                if '机构' in trader_name or '基金' in trader_name or '保险' in trader_name or '社保' in trader_name:
+                    code = seat.get('stock_code', '')
+                    if not code:
+                        continue
+                    
+                    if code not in org_buy_stocks:
+                        org_buy_stocks[code] = {
+                            'code': code,
+                            'name': seat.get('stock_name', ''),
+                            'org_buy_amount': 0.0,
+                            'org_sell_amount': 0.0,
+                            'org_buy_count': 0,
+                            'org_sell_count': 0,
+                            'org_traders': [],
+                        }
+                    
+                    buy_amount = float(seat.get('buy_amount', 0) or 0)
+                    sell_amount = float(seat.get('sell_amount', 0) or 0)
+                    
+                    org_buy_stocks[code]['org_buy_amount'] += buy_amount
+                    org_buy_stocks[code]['org_sell_amount'] += sell_amount
+                    
+                    if buy_amount > 0:
+                        org_buy_stocks[code]['org_buy_count'] += 1
+                        org_buy_stocks[code]['org_traders'].append(f"{trader_name}(买{buy_amount:.2f}亿)")
+                    if sell_amount > 0:
+                        org_buy_stocks[code]['org_sell_count'] += 1
+            
+            # 如果席位明细为空，从龙虎榜股票中提取
+            if not org_buy_stocks:
+                for stock in lhb_stocks:
+                    # 检查是否有机构买入标记
+                    if stock.get('org_buy', 0) > 0 or '机构' in str(stock.get('reason', '')):
+                        code = stock.get('code', '')
+                        if code:
+                            org_buy_stocks[code] = {
+                                'code': code,
+                                'name': stock.get('name', ''),
+                                'org_buy_amount': float(stock.get('org_buy', 0) or 0),
+                                'org_sell_amount': float(stock.get('org_sell', 0) or 0),
+                                'org_buy_count': 1 if stock.get('org_buy', 0) > 0 else 0,
+                                'org_sell_count': 0,
+                                'org_traders': [],
+                                'change_pct': float(stock.get('change_pct', 0) or 0),
+                                'reason': stock.get('reason', ''),
+                            }
+            
+            if not org_buy_stocks:
+                logger.info("[大盘] 未发现机构买入股票")
+                return []
+            
+            logger.info(f"[大盘] 发现 {len(org_buy_stocks)} 只有机构参与的股票")
+            
+            # 获取千股千评数据补充关注指数
+            cache_key = "stock_comment_em"
+            comment_df = self._get_cached_data(cache_key)
+            
+            if comment_df is None:
+                comment_df = self._call_akshare_with_retry(ak.stock_comment_em, "千股千评", attempts=1)
+                if comment_df is not None and not comment_df.empty:
+                    self._set_cached_data(cache_key, comment_df)
+            
+            avg_attention = 50.0
+            if comment_df is not None and not comment_df.empty:
+                comment_df['关注指数'] = pd.to_numeric(comment_df['关注指数'], errors='coerce')
+                avg_attention = comment_df['关注指数'].mean()
+            
+            # 获取实时行情补充涨跌幅
+            cache_key_spot = "stock_zh_a_spot"
+            spot_df = self._get_cached_data(cache_key_spot)
+            
+            if spot_df is None:
+                spot_df = self._call_akshare_with_retry(ak.stock_zh_a_spot_em, "A股实时行情", attempts=1)
+                if spot_df is not None and not spot_df.empty:
+                    self._set_cached_data(cache_key_spot, spot_df)
+            
+            # 筛选符合条件的股票
+            for code, stock_info in org_buy_stocks.items():
+                # 计算机构净买入
+                net_buy = stock_info['org_buy_amount'] - stock_info['org_sell_amount']
+                
+                # 条件1：机构净买入 > 0
+                if net_buy <= 0:
+                    continue
+                
+                stock_data = {
+                    'code': code,
+                    'name': stock_info['name'],
+                    'org_buy_amount': stock_info['org_buy_amount'],
+                    'org_sell_amount': stock_info['org_sell_amount'],
+                    'org_net_buy': net_buy,
+                    'org_buy_count': stock_info['org_buy_count'],
+                    'org_traders': stock_info.get('org_traders', [])[:3],  # 最多3个
+                    'reason': stock_info.get('reason', ''),
+                    'attention': 0.0,
+                    'avg_attention': avg_attention,
+                    'score': 0.0,
+                    'change_pct': stock_info.get('change_pct', 0.0),
+                    'industry': '',
+                    'market_cap': 0.0,
+                }
+                
+                # 补充千股千评数据
+                if comment_df is not None and not comment_df.empty:
+                    stock_comment = comment_df[comment_df['代码'] == code]
+                    if not stock_comment.empty:
+                        row = stock_comment.iloc[0]
+                        stock_data['attention'] = float(row.get('关注指数', 0) or 0)
+                        stock_data['score'] = float(row.get('综合得分', 0) or 0)
+                
+                # 补充实时行情数据
+                if spot_df is not None and not spot_df.empty:
+                    stock_spot = spot_df[spot_df['代码'] == code]
+                    if not stock_spot.empty:
+                        spot_row = stock_spot.iloc[0]
+                        stock_data['change_pct'] = float(spot_row.get('涨跌幅', 0) or 0)
+                        stock_data['industry'] = str(spot_row.get('所属行业', ''))
+                        stock_data['market_cap'] = float(spot_row.get('总市值', 0) or 0) / 1e8
+                
+                # 条件2：涨幅不大（< 6%），排除已经爆发的
+                if stock_data['change_pct'] >= 6:
+                    continue
+                
+                # 条件3：关注指数不高（< 市场平均），散户还没跟进
+                # 放宽条件：关注指数 < 平均的 120%
+                if stock_data['attention'] > avg_attention * 1.2:
+                    continue
+                
+                accumulation_stocks.append(stock_data)
+            
+            # 按机构净买入金额排序
+            accumulation_stocks.sort(key=lambda x: x['org_net_buy'], reverse=True)
+            
+            logger.info(f"[大盘] 识别出 {len(accumulation_stocks)} 只机构悄悄建仓股票")
+            
+            return accumulation_stocks[:15]  # 返回前15只
+            
+        except Exception as e:
+            logger.warning(f"[大盘] 识别机构悄悄建仓股票失败: {e}")
+            return []
+
     def _get_sector_opportunity_data(self, overview: MarketOverview):
         """
         获取板块埋伏机会数据
@@ -2248,6 +2663,582 @@ A股 政策 利好 最新消息
         except Exception as e:
             logger.warning(f"[大盘] LLM 生成搜索词异常: {e}")
             return None
+
+    # ========== 新增：增强版历史分析方法 ==========
+    
+    def _get_index_technical_data(self, overview: MarketOverview):
+        """
+        获取指数技术面数据
+        
+        优化：先从数据库读取历史数据，不足时才调用 API
+        API 数据会自动存入数据库，避免重复调用
+        """
+        try:
+            logger.info("[大盘] 获取指数技术面数据...")
+            
+            history_manager = self._get_history_manager()
+            target_date = date.fromisoformat(overview.date)
+            
+            # 主要指数代码（去掉前缀）
+            index_codes = {
+                '000001': '上证指数',
+                '399001': '深证成指',
+                '399006': '创业板指',
+                '000300': '沪深300',
+                '000905': '中证500',
+            }
+            
+            # 计算技术指标需要的历史天数
+            required_days = 90
+            start_date = target_date - timedelta(days=required_days)
+            
+            index_data = {}
+            
+            for code, name in index_codes.items():
+                try:
+                    df = None
+                    
+                    # 1. 先尝试从数据库获取历史数据
+                    if history_manager:
+                        db_count = history_manager.get_index_data_count(code, start_date, target_date)
+                        
+                        if db_count >= 60:  # 数据库有足够数据（至少60天）
+                            logger.debug(f"[大盘] {name} 从数据库读取 {db_count} 条历史数据")
+                            db_history = history_manager.get_index_history_range(code, start_date, target_date)
+                            
+                            if db_history:
+                                # 转换为 DataFrame
+                                df = pd.DataFrame(db_history)
+                                df = df.rename(columns={
+                                    'open': '开盘',
+                                    'close': '收盘',
+                                    'high': '最高',
+                                    'low': '最低',
+                                    'volume': '成交量',
+                                    'amount': '成交额',
+                                    'change_pct': '涨跌幅',
+                                })
+                    
+                    # 2. 数据库数据不足，从 API 获取
+                    if df is None or len(df) < 60:
+                        logger.info(f"[大盘] {name} 从 API 获取历史数据...")
+                        end_date_str = overview.date.replace('-', '')
+                        start_date_str = start_date.strftime('%Y%m%d')
+                        
+                        df = ak.index_zh_a_hist(
+                            symbol=code,
+                            period="daily",
+                            start_date=start_date_str,
+                            end_date=end_date_str
+                        )
+                        
+                        # 保存到数据库（供下次使用）
+                        if df is not None and not df.empty and history_manager:
+                            saved = history_manager.save_index_history_batch(code, name, df)
+                            logger.info(f"[大盘] {name} 保存 {saved} 条历史数据到数据库")
+                    
+                    if df is None or df.empty:
+                        continue
+                    
+                    # 计算技术指标
+                    df = self._calculate_technical_indicators(df)
+                    
+                    # 获取最新一天的数据
+                    latest = df.iloc[-1]
+                    
+                    data = {
+                        'index_code': code,
+                        'index_name': name,
+                        'open': float(latest.get('开盘', 0) or 0),
+                        'high': float(latest.get('最高', 0) or 0),
+                        'low': float(latest.get('最低', 0) or 0),
+                        'close': float(latest.get('收盘', 0) or 0),
+                        'volume': float(latest.get('成交量', 0) or 0),
+                        'amount': float(latest.get('成交额', 0) or 0),
+                        'change_pct': float(latest.get('涨跌幅', 0) or 0),
+                        'ma5': float(latest.get('MA5', 0) or 0),
+                        'ma10': float(latest.get('MA10', 0) or 0),
+                        'ma20': float(latest.get('MA20', 0) or 0),
+                        'ma60': float(latest.get('MA60', 0) or 0),
+                        'macd': float(latest.get('MACD', 0) or 0),
+                        'macd_signal': float(latest.get('MACD_SIGNAL', 0) or 0),
+                        'macd_hist': float(latest.get('MACD_HIST', 0) or 0),
+                        'rsi_6': float(latest.get('RSI_6', 50) or 50),
+                        'rsi_12': float(latest.get('RSI_12', 50) or 50),
+                        'kdj_k': float(latest.get('KDJ_K', 50) or 50),
+                        'kdj_d': float(latest.get('KDJ_D', 50) or 50),
+                        'kdj_j': float(latest.get('KDJ_J', 50) or 50),
+                    }
+                    
+                    index_data[code] = data
+                    
+                    # 保存技术指标到数据库（更新当天记录）
+                    if history_manager:
+                        save_data = {
+                            'code': code,
+                            'name': name,
+                            'open': data['open'],
+                            'close': data['close'],
+                            'high': data['high'],
+                            'low': data['low'],
+                            'volume': data['volume'],
+                            'amount': data['amount'],
+                            'change_pct': data['change_pct'],
+                            'ma5': data['ma5'],
+                            'ma10': data['ma10'],
+                            'ma20': data['ma20'],
+                            'ma60': data['ma60'],
+                            'macd': data['macd'],
+                            'macd_signal': data['macd_signal'],
+                            'macd_hist': data['macd_hist'],
+                            'rsi_6': data['rsi_6'],
+                            'rsi_12': data['rsi_12'],
+                        }
+                        history_manager.save_index_daily(save_data, target_date)
+                    
+                    logger.debug(f"[大盘] {name} 技术指标: MA5={data['ma5']:.2f}, RSI={data['rsi_6']:.1f}")
+                    
+                except Exception as e:
+                    logger.warning(f"[大盘] 获取 {name} 技术数据失败: {e}")
+                    continue
+            
+            overview.index_technical = index_data
+            logger.info(f"[大盘] 获取到 {len(index_data)} 个指数技术面数据")
+            
+        except Exception as e:
+            logger.error(f"[大盘] 获取指数技术面数据失败: {e}")
+            overview.index_technical = {}
+    
+    def _calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算技术指标
+        
+        Args:
+            df: 包含 OHLCV 数据的 DataFrame
+            
+        Returns:
+            添加了技术指标的 DataFrame
+        """
+        try:
+            close = df['收盘'].astype(float)
+            high = df['最高'].astype(float)
+            low = df['最低'].astype(float)
+            
+            # 均线
+            df['MA5'] = close.rolling(window=5).mean()
+            df['MA10'] = close.rolling(window=10).mean()
+            df['MA20'] = close.rolling(window=20).mean()
+            df['MA60'] = close.rolling(window=60).mean()
+            
+            # MACD
+            exp1 = close.ewm(span=12, adjust=False).mean()
+            exp2 = close.ewm(span=26, adjust=False).mean()
+            df['MACD'] = exp1 - exp2
+            df['MACD_SIGNAL'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            df['MACD_HIST'] = df['MACD'] - df['MACD_SIGNAL']
+            
+            # RSI
+            delta = close.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=6).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=6).mean()
+            rs = gain / loss
+            df['RSI_6'] = 100 - (100 / (1 + rs))
+            
+            gain12 = (delta.where(delta > 0, 0)).rolling(window=12).mean()
+            loss12 = (-delta.where(delta < 0, 0)).rolling(window=12).mean()
+            rs12 = gain12 / loss12
+            df['RSI_12'] = 100 - (100 / (1 + rs12))
+            
+            # KDJ
+            low_min = low.rolling(window=9).min()
+            high_max = high.rolling(window=9).max()
+            rsv = (close - low_min) / (high_max - low_min) * 100
+            df['KDJ_K'] = rsv.ewm(com=2, adjust=False).mean()
+            df['KDJ_D'] = df['KDJ_K'].ewm(com=2, adjust=False).mean()
+            df['KDJ_J'] = 3 * df['KDJ_K'] - 2 * df['KDJ_D']
+            
+        except Exception as e:
+            logger.warning(f"[大盘] 计算技术指标失败: {e}")
+        
+        return df
+    
+    def _get_sentiment_cycle_data(self, overview: MarketOverview):
+        """
+        获取情绪周期数据
+        
+        基于涨停溢价率、炸板率、连板高度等指标判断市场情绪周期
+        """
+        try:
+            logger.info("[大盘] 获取情绪周期数据...")
+            
+            history_manager = self._get_history_manager()
+            target_date = date.fromisoformat(overview.date)
+            
+            # 计算情绪指标
+            sentiment_data = {
+                'zt_count': overview.zt_pool_count,
+                'zt_first_board': overview.zt_first_board_count,
+                'zt_continuous': overview.zt_continuous_count,
+                'max_continuous': overview.zt_max_continuous,
+                'zb_count': overview.zb_pool_count,
+                'dt_count': overview.dt_pool_count,
+                'up_count': overview.up_count,
+                'down_count': overview.down_count,
+            }
+            
+            # 计算涨停溢价率（昨日涨停今日平均涨幅）
+            sentiment_data['zt_premium'] = overview.previous_zt_avg_change
+            
+            # 计算炸板率
+            if overview.zt_pool_count > 0:
+                sentiment_data['zb_rate'] = overview.zb_pool_count / (overview.zt_pool_count + overview.zb_pool_count) * 100
+            else:
+                sentiment_data['zb_rate'] = 0
+            
+            # 计算情绪得分 (0-100)
+            sentiment_data['sentiment_score'] = self._calculate_sentiment_score(sentiment_data)
+            sentiment_data['sentiment_level'] = self._get_sentiment_level(sentiment_data['sentiment_score'])
+            
+            # 保存到数据库
+            if history_manager:
+                history_manager.save_sentiment_daily(sentiment_data, target_date)
+            
+            overview.sentiment_cycle = sentiment_data
+            logger.info(f"[大盘] 情绪得分: {sentiment_data['sentiment_score']:.0f} ({sentiment_data['sentiment_level']})")
+            
+        except Exception as e:
+            logger.error(f"[大盘] 获取情绪周期数据失败: {e}")
+            overview.sentiment_cycle = {}
+    
+    def _calculate_sentiment_score(self, data: Dict[str, Any]) -> float:
+        """
+        计算情绪得分 (0-100)
+        
+        综合考虑：涨停数量、连板高度、炸板率、涨跌比等
+        """
+        score = 50  # 基准分
+        
+        # 涨停数量贡献 (0-20分)
+        zt_count = data.get('zt_count', 0)
+        if zt_count >= 100:
+            score += 20
+        elif zt_count >= 60:
+            score += 15
+        elif zt_count >= 30:
+            score += 10
+        elif zt_count >= 15:
+            score += 5
+        elif zt_count < 10:
+            score -= 10
+        
+        # 连板高度贡献 (0-15分)
+        max_height = data.get('max_continuous', 0)
+        if max_height >= 10:
+            score += 15
+        elif max_height >= 7:
+            score += 10
+        elif max_height >= 5:
+            score += 5
+        elif max_height <= 2:
+            score -= 5
+        
+        # 炸板率扣分 (0-15分)
+        zb_rate = data.get('zb_rate', 0)
+        if zb_rate >= 50:
+            score -= 15
+        elif zb_rate >= 30:
+            score -= 10
+        elif zb_rate >= 20:
+            score -= 5
+        elif zb_rate < 10:
+            score += 5
+        
+        # 涨跌比贡献 (0-10分)
+        up_count = data.get('up_count', 0)
+        down_count = data.get('down_count', 0)
+        if up_count > 0 and down_count > 0:
+            ratio = up_count / down_count
+            if ratio >= 3:
+                score += 10
+            elif ratio >= 2:
+                score += 5
+            elif ratio <= 0.5:
+                score -= 10
+            elif ratio <= 0.7:
+                score -= 5
+        
+        # 涨停溢价率贡献 (0-10分)
+        premium = data.get('zt_premium', 0)
+        if premium >= 5:
+            score += 10
+        elif premium >= 2:
+            score += 5
+        elif premium <= -3:
+            score -= 10
+        elif premium <= 0:
+            score -= 5
+        
+        return max(0, min(100, score))
+    
+    def _get_sentiment_level(self, score: float) -> str:
+        """根据情绪得分返回情绪等级"""
+        if score >= 80:
+            return '亢奋'
+        elif score >= 60:
+            return '活跃'
+        elif score >= 40:
+            return '中性'
+        elif score >= 20:
+            return '低迷'
+        else:
+            return '冰点'
+    
+    def _get_sector_rotation_data(self, overview: MarketOverview):
+        """
+        获取板块轮动数据
+        
+        使用 ak.stock_sector_fund_flow_rank() 获取板块资金流向
+        增强：获取多周期数据，提供原始数据供 LLM 分析
+        优化：先检查数据库是否有当天数据，避免重复 API 调用
+        """
+        try:
+            logger.info("[大盘] 获取板块轮动数据...")
+            
+            history_manager = self._get_history_manager()
+            target_date = date.fromisoformat(overview.date)
+            
+            rotation_data = {
+                'top_inflow': [],
+                'top_outflow': [],
+                'sector_details': [],
+                'raw_history': {},      # 原始历史数据，供 LLM 分析
+                'rotation_analysis': {},  # 规则分析结果（辅助参考）
+            }
+            
+            # 先检查数据库是否有当天数据
+            if history_manager and history_manager.has_sector_rotation_data(target_date):
+                cached_sectors = history_manager.get_sector_rotation_daily(target_date)
+                if cached_sectors:
+                    logger.info(f"[大盘] 使用缓存的板块轮动数据: {len(cached_sectors)} 个板块")
+                    
+                    # 从缓存构建 rotation_data
+                    for s in cached_sectors:
+                        rotation_data['sector_details'].append({
+                            'sector_name': s.get('sector_name', ''),
+                            'change_pct': s.get('change_pct', 0),
+                            'main_net_inflow': s.get('net_inflow', 0),
+                            'main_net_ratio': s.get('net_inflow_ratio', 0),
+                            'rank_today': s.get('rank', 0),
+                            'net_inflow': s.get('net_inflow', 0),
+                            'change_5d': s.get('change_5d', 0),
+                            'change_10d': s.get('change_10d', 0),
+                        })
+                    
+                    # 按主力净流入排序
+                    sorted_sectors = sorted(rotation_data['sector_details'], 
+                                          key=lambda x: x['main_net_inflow'], reverse=True)
+                    rotation_data['top_inflow'] = sorted_sectors[:10]
+                    rotation_data['top_outflow'] = sorted_sectors[-10:][::-1]
+                    
+                    # 获取历史数据（供 LLM 分析）
+                    raw_history = history_manager.get_sector_rotation_raw_data(days=10)
+                    rotation_data['raw_history'] = raw_history
+                    
+                    sustainability_data = history_manager.get_sector_sustainability_data(days=10)
+                    rotation_data['sustainability_data'] = sustainability_data
+                    
+                    rotation_analysis = history_manager.analyze_sector_rotation_pattern(days=10)
+                    rotation_data['rotation_analysis'] = rotation_analysis
+                    
+                    overview.sector_rotation = rotation_data
+                    return
+            
+            # 数据库没有数据，从 API 获取
+            # 获取今日板块资金流向
+            sector_today = {}
+            try:
+                df = ak.stock_sector_fund_flow_rank(indicator="今日")
+                
+                if df is not None and not df.empty:
+                    for rank, (_, row) in enumerate(df.iterrows(), 1):
+                        name = str(row.get('名称', ''))
+                        sector_today[name] = {
+                            'sector_name': name,
+                            'change_pct': float(row.get('今日涨跌幅', 0) or 0),
+                            'main_net_inflow': float(row.get('主力净流入-净额', 0) or 0) / 1e8,
+                            'main_net_ratio': float(row.get('主力净流入-净占比', 0) or 0),
+                            'rank_today': rank,
+                            'net_inflow': float(row.get('主力净流入-净额', 0) or 0) / 1e8,
+                        }
+                    logger.info(f"[大盘] 获取到 {len(sector_today)} 个板块今日数据")
+            except Exception as e:
+                logger.warning(f"[大盘] 获取今日板块资金流向失败: {e}")
+            
+            # 获取5日板块资金流向
+            sector_5d = {}
+            try:
+                df_5d = ak.stock_sector_fund_flow_rank(indicator="5日")
+                if df_5d is not None and not df_5d.empty:
+                    for _, row in df_5d.iterrows():
+                        name = str(row.get('名称', ''))
+                        sector_5d[name] = {
+                            'change_5d': float(row.get('5日涨跌幅', 0) or 0),
+                            'net_inflow_5d': float(row.get('主力净流入-净额', 0) or 0) / 1e8,
+                        }
+            except Exception as e:
+                logger.warning(f"[大盘] 获取5日板块数据失败: {e}")
+            
+            # 获取10日板块资金流向
+            sector_10d = {}
+            try:
+                df_10d = ak.stock_sector_fund_flow_rank(indicator="10日")
+                if df_10d is not None and not df_10d.empty:
+                    for _, row in df_10d.iterrows():
+                        name = str(row.get('名称', ''))
+                        sector_10d[name] = {
+                            'change_10d': float(row.get('10日涨跌幅', 0) or 0),
+                            'net_inflow_10d': float(row.get('主力净流入-净额', 0) or 0) / 1e8,
+                        }
+            except Exception as e:
+                logger.warning(f"[大盘] 获取10日板块数据失败: {e}")
+            
+            # 合并数据
+            for name, data in sector_today.items():
+                if name in sector_5d:
+                    data.update(sector_5d[name])
+                if name in sector_10d:
+                    data.update(sector_10d[name])
+                rotation_data['sector_details'].append(data)
+            
+            # 按主力净流入排序
+            sorted_sectors = sorted(rotation_data['sector_details'], 
+                                  key=lambda x: x['main_net_inflow'], reverse=True)
+            rotation_data['top_inflow'] = sorted_sectors[:10]
+            rotation_data['top_outflow'] = sorted_sectors[-10:][::-1]
+            
+            # 保存到数据库
+            if history_manager and rotation_data['sector_details']:
+                history_manager.save_sector_rotation_daily(rotation_data['sector_details'], target_date)
+                
+                # 获取原始历史数据（供 LLM 分析）
+                raw_history = history_manager.get_sector_rotation_raw_data(days=10)
+                rotation_data['raw_history'] = raw_history
+                
+                # 获取板块持续性数据（供 LLM 判断板块是否有持续性）
+                sustainability_data = history_manager.get_sector_sustainability_data(days=10)
+                rotation_data['sustainability_data'] = sustainability_data
+                
+                # 获取规则分析结果（辅助参考）
+                rotation_analysis = history_manager.analyze_sector_rotation_pattern(days=10)
+                rotation_data['rotation_analysis'] = rotation_analysis
+                
+                if raw_history.get('has_data'):
+                    logger.info(f"[大盘] 获取到 {raw_history.get('analysis_days', 0)} 天板块历史数据")
+                if sustainability_data.get('has_data'):
+                    logger.info(f"[大盘] 获取到 {len(sustainability_data.get('sectors', {}))} 个板块持续性数据")
+            
+            overview.sector_rotation = rotation_data
+            
+        except Exception as e:
+            logger.error(f"[大盘] 获取板块轮动数据失败: {e}")
+            overview.sector_rotation = {}
+    
+    def _get_capital_flow_data(self, overview: MarketOverview):
+        """
+        获取资金面数据
+        
+        使用 ak.stock_market_fund_flow() 获取大盘资金流向
+        优化：先检查数据库是否有当天数据，避免重复 API 调用
+        """
+        try:
+            logger.info("[大盘] 获取资金面数据...")
+            
+            history_manager = self._get_history_manager()
+            target_date = date.fromisoformat(overview.date)
+            
+            capital_data = {
+                'total_amount': overview.total_amount,
+                'margin_balance': overview.margin_balance,
+                'margin_buy': overview.margin_buy,
+                'lhb_org_net_buy': overview.lhb_org_net_buy,
+            }
+            
+            # 先检查数据库是否有当天数据
+            if history_manager and history_manager.has_capital_flow_data(target_date):
+                cached_data = history_manager.get_capital_flow_daily(target_date)
+                if cached_data:
+                    logger.info("[大盘] 使用缓存的资金面数据")
+                    capital_data['main_net_inflow'] = cached_data.get('main_net_inflow', 0) or 0
+                    capital_data['retail_net_inflow'] = cached_data.get('retail_net_inflow', 0) or 0
+                    capital_data['sh_net_inflow'] = cached_data.get('sh_net_inflow', 0) or 0
+                    capital_data['sz_net_inflow'] = cached_data.get('sz_net_inflow', 0) or 0
+                    overview.capital_flow = capital_data
+                    return
+            
+            # 数据库没有数据，从 API 获取大盘资金流向
+            try:
+                df = ak.stock_market_fund_flow()
+                
+                if df is not None and not df.empty:
+                    # 获取最新一天的数据
+                    latest = df.iloc[-1]
+                    capital_data['main_net_inflow'] = float(latest.get('主力净流入-净额', 0) or 0) / 1e8
+                    capital_data['retail_net_inflow'] = float(latest.get('散户净流入-净额', 0) or 0) / 1e8
+                    capital_data['sh_net_inflow'] = float(latest.get('沪股通-净流入', 0) or 0) / 1e8 if '沪股通-净流入' in latest else 0
+                    capital_data['sz_net_inflow'] = float(latest.get('深股通-净流入', 0) or 0) / 1e8 if '深股通-净流入' in latest else 0
+                    
+                    logger.info(f"[大盘] 主力净流入: {capital_data['main_net_inflow']:.2f}亿")
+                    
+            except Exception as e:
+                logger.warning(f"[大盘] 获取大盘资金流向失败: {e}")
+            
+            # 保存到数据库
+            if history_manager:
+                history_manager.save_capital_flow_daily(capital_data, target_date)
+            
+            overview.capital_flow = capital_data
+            
+        except Exception as e:
+            logger.error(f"[大盘] 获取资金面数据失败: {e}")
+            overview.capital_flow = {}
+    
+    def _get_enhanced_historical_context(self, overview: MarketOverview):
+        """
+        获取增强版历史上下文
+        
+        整合指数技术面、情绪周期、板块轮动、资金面四个维度的历史数据
+        """
+        try:
+            history_manager = self._get_history_manager()
+            if history_manager is None:
+                logger.warning("[历史数据] 历史数据管理器不可用")
+                return
+            
+            # 获取增强版历史上下文
+            context = history_manager.get_enhanced_historical_context(days=10)
+            
+            if context.get('has_history'):
+                overview.enhanced_historical_context = context
+                logger.info("[历史数据] 获取增强版历史上下文成功")
+                
+                # 输出关键趋势信息
+                if 'index_technical' in context:
+                    for code, data in context['index_technical'].items():
+                        trend = data.get('trend', {})
+                        logger.info(f"[历史数据] {code} 趋势: {trend.get('ma_status', '未知')}, "
+                                  f"MACD: {trend.get('macd_status', '未知')}, RSI: {trend.get('rsi_status', '未知')}")
+                
+                if 'sentiment_cycle' in context:
+                    trend = context['sentiment_cycle'].get('trend', {})
+                    logger.info(f"[历史数据] 情绪周期: {trend.get('cycle_position', '未知')}, "
+                              f"趋势: {trend.get('trend_direction', '未知')}")
+            else:
+                logger.info("[历史数据] 增强版历史数据不足")
+                overview.enhanced_historical_context = {'has_history': False}
+                
+        except Exception as e:
+            logger.warning(f"[历史数据] 获取增强版历史上下文失败: {e}")
+            overview.enhanced_historical_context = {'has_history': False, 'error': str(e)}
 
 
 # ============================================================
@@ -3113,7 +4104,7 @@ class SectorOpportunityAnalyzer:
         logger.info("========== 板块机会分析完成 ==========")
         
         return opportunities
-    
+
 
 # 测试入口
 if __name__ == "__main__":
